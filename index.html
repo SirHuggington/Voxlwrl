@@ -1,0 +1,501 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Tiny Voxel World — Physics</title>
+<style>
+  html,body{height:100%;margin:0;background:#111;color:#ddd;font-family:Inter,system-ui,Arial}
+  #wrap{height:100vh;display:flex;align-items:stretch}
+  #canvasWrap{flex:1;position:relative}
+  canvas{display:block;width:100%;height:100%}
+  #ui{position:absolute;left:12px;top:12px;z-index:5;background:rgba(0,0,0,0.25);padding:8px;border-radius:6px}
+  #cross{position:absolute;left:50%;top:50%;width:18px;height:18px;margin:-9px 0 0 -9px;pointer-events:none;z-index:4}
+  #cross:after{content:'';position:absolute;left:50%;top:50%;width:2px;height:2px;margin:-1px 0 0 -1px;background:white;border-radius:50%}
+  button{margin-left:6px}
+  #help{position:absolute;right:12px;top:12px;padding:8px;background:rgba(0,0,0,0.25);border-radius:6px}
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div id="canvasWrap">
+    <canvas id="c"></canvas>
+    <div id="ui">WASD move • Space jump • Click to lock mouse • Left click = remove • Right click = place <button id="regen">Regenerate</button></div>
+    <div id="help">Blocks: <span id="count">0</span> • Time: <span id="time">12:00</span></div>
+
+    <div id="cross"></div>
+  </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r134/three.min.js"></script>
+
+<script>
+/* ---------------- Settings ---------------- */
+const SX = 32, SY = 8, SZ = 32; // grid dims
+const BLOCK_SIZE = 1;
+const FALL_DEATH_Y = -8; // if player falls below this, respawn
+const RESPAWN_POS = new THREE.Vector3(0, 4, 0);
+
+/* ---------------- Basic three setup ---------------- */
+const canvas = document.getElementById('c');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x86c7ff);
+const camera = new THREE.PerspectiveCamera(70, 2, 0.1, 500);
+camera.position.set(0, 6, 12);
+// Day / Night lights & sky setup
+const sunLight = new THREE.DirectionalLight(0xffffff, 1.0);
+sunLight.position.set(5, 10, 7);
+sunLight.castShadow = false;
+scene.add(sunLight);
+
+const ambientLight = new THREE.AmbientLight(0x888888, 0.5);
+scene.add(ambientLight);
+
+// Sky colors we will blend between
+const daySky = new THREE.Color(0x86c7ff);    // daytime sky
+const sunsetSky = new THREE.Color(0xffb86b); // sunrise/sunset tint
+const nightSky = new THREE.Color(0x081028);  // night sky
+
+// Time / day settings
+const DAY_DURATION = 60; // seconds for a full 24h cycle (change to taste)
+let timeOfDay = 12.0;    // starting hour (0 - 24). 12 = noon
+
+// ---- Stars & Moon setup (paste here) ----
+
+// Moon visual + moonlight
+const moonGeom = new THREE.SphereGeometry(2.0, 16, 12);
+const moonMat = new THREE.MeshStandardMaterial({
+  color: 0xffffff,
+  emissive: 0xeef6ff,
+  emissiveIntensity: 0.9,
+  roughness: 0.9,
+  metalness: 0.0,
+});
+const moonMesh = new THREE.Mesh(moonGeom, moonMat);
+moonMesh.visible = true;
+scene.add(moonMesh);
+
+// A directional moon light (soft bluish light)
+const moonLight = new THREE.DirectionalLight(0xddeeff, 0.0);
+moonLight.castShadow = false;
+scene.add(moonLight);
+moonLight.target.position.set(0,0,0);
+scene.add(moonLight.target);
+
+// Stars: points in the sky (simple particle field)
+const STAR_COUNT = 800;
+const starPositions = new Float32Array(STAR_COUNT * 3);
+for (let i = 0; i < STAR_COUNT; i++) {
+  // distribute stars in a large spherical shell above and around the world
+  const r = 120 + Math.random() * 80; // radius
+  // sample direction with bias so many stars are above horizon
+  const theta = Math.acos(THREE.MathUtils.randFloatSpread(1) * 0.6 + 0.4); // bias upward
+  const phi = Math.random() * Math.PI * 2;
+  const x = r * Math.sin(theta) * Math.cos(phi);
+  const y = r * Math.cos(theta);
+  const z = r * Math.sin(theta) * Math.sin(phi);
+  starPositions[i*3+0] = x;
+  starPositions[i*3+1] = y;
+  starPositions[i*3+2] = z;
+}
+const starsGeo = new THREE.BufferGeometry();
+starsGeo.setAttribute('position', new THREE.BufferAttribute(starPositions, 3));
+const starsMat = new THREE.PointsMaterial({
+  size: 1.2,
+  sizeAttenuation: true,
+  transparent: true,
+  opacity: 0.0, // start invisible (will fade in at night)
+  depthWrite: false,
+});
+const starField = new THREE.Points(starsGeo, starsMat);
+scene.add(starField);
+
+// Helper: ensure these objects exist in outer scope for animate() to update
+// (moonMesh, moonLight, starField, starsMat are already defined)
+
+
+
+const dummyGeo = new THREE.BoxGeometry(BLOCK_SIZE, BLOCK_SIZE, BLOCK_SIZE);
+const blockMat = new THREE.MeshStandardMaterial({ color: 0x9b7b4f }); // base color
+
+/* ---------------- Grid & mapping ---------------- */
+const size = SX * SY * SZ;
+let grid = new Uint8Array(size); // 0=empty, 1=block
+function idx(x,y,z){ return (y * SZ + z) * SX + x; }
+function inside(x,y,z){ return x>=0 && x<SX && y>=0 && y<SY && z>=0 && z<SZ; }
+
+/* ---------------- InstancedMesh for blocks ---------------- */
+const maxInstances = BLOCK_SIZE * SX * SY * SZ; // over-alloc but fine
+const instanced = new THREE.InstancedMesh(dummyGeo, blockMat, SX*SY*SZ);
+instanced.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+scene.add(instanced);
+if (!instanced.instanceColor) {
+  const colors = new Float32Array(SX*SY*SZ * 3);
+  instanced.instanceColor = new THREE.InstancedBufferAttribute(colors, 3);
+}
+let instanceCount = 0;
+const indexToInstance = new Int32Array(size).fill(-1);
+const instanceToIndex = new Int32Array(SX*SY*SZ).fill(-1);
+
+/* ---------------- Simple terrain generator ---------------- */
+function generateTerrain() {
+  grid.fill(0);
+  for (let x=0;x<SX;x++){
+    for (let z=0;z<SZ;z++){
+      const h = Math.max(1, Math.floor(2 + Math.sin(x*0.25) * 2 + Math.cos(z*0.17) * 1.5 + Math.random()*2.2));
+      for (let y=0;y<h && y<SY;y++){
+        grid[idx(x,y,z)] = 1;
+      }
+    }
+  }
+  rebuildInstances();
+}
+
+/* ---------------- Rebuild instanced mesh from grid ---------------- */
+function rebuildInstances(){
+  let inst = 0;
+  indexToInstance.fill(-1);
+  instanceToIndex.fill(-1);
+  const color = new THREE.Color();
+  const matrix = new THREE.Matrix4();
+  for (let x=0;x<SX;x++){
+    for (let y=0;y<SY;y++){
+      for (let z=0;z<SZ;z++){
+        const i = idx(x,y,z);
+        if (grid[i]){
+          const px = (x - SX/2) * BLOCK_SIZE + BLOCK_SIZE/2;
+          const py = y * BLOCK_SIZE + BLOCK_SIZE/2;
+          const pz = (z - SZ/2) * BLOCK_SIZE + BLOCK_SIZE/2;
+          matrix.makeTranslation(px, py, pz);
+          instanced.setMatrixAt(inst, matrix);
+          color.setHSL(0.08 + (y / SY) * 0.12, 0.4, 0.35 + (y / SY) * 0.18);
+          if (instanced.setColorAt) {
+            instanced.setColorAt(inst, color);
+          } else if (instanced.instanceColor) {
+            const arr = instanced.instanceColor.array;
+            arr[inst*3+0] = color.r; arr[inst*3+1] = color.g; arr[inst*3+2] = color.b;
+          }
+          indexToInstance[i] = inst;
+          instanceToIndex[inst] = i;
+          inst++;
+        }
+      }
+    }
+  }
+  instanceCount = inst;
+  instanced.count = instanceCount;
+  if (instanced.instanceColor && instanced.instanceColor.needsUpdate !== undefined) instanced.instanceColor.needsUpdate = true;
+  instanced.instanceMatrix.needsUpdate = true;
+  document.getElementById('count').textContent = instanceCount;
+}
+
+/* ---------------- Raycast helpers for placement/removal ---------------- */
+const raycaster = new THREE.Raycaster();
+const clickPoint = new THREE.Vector2(0,0); // center
+function pickInstance() {
+  raycaster.setFromCamera(clickPoint, camera);
+  const hits = raycaster.intersectObject(instanced, false);
+  return hits.length ? hits[0] : null;
+}
+
+/* ---------------- Add/Remove block ---------------- */
+function removeBlockAtInstance(instanceId) {
+  if (instanceId < 0) return;
+  const gidx = instanceToIndex[instanceId];
+  if (gidx === -1) return;
+  grid[gidx] = 0;
+  rebuildInstances();
+}
+function addBlockAdjacent(hit) {
+  if (!hit) return;
+  const instId = hit.instanceId;
+  const gidx = instanceToIndex[instId];
+  if (gidx === -1) return;
+  const gx = gidx % SX;
+  const rest = Math.floor(gidx / SX);
+  const gz = rest % SZ;
+  const gy = Math.floor(rest / SZ);
+  const n = hit.face ? hit.face.normal.clone() : new THREE.Vector3(0,1,0);
+  const ax = gx + Math.round(n.x);
+  const ay = gy + Math.round(n.y);
+  const az = gz + Math.round(n.z);
+  if (ax >=0 && ax < SX && ay >=0 && ay < SY && az >=0 && az < SZ && !grid[idx(ax,ay,az)]) {
+    grid[idx(ax,ay,az)] = 1;
+    rebuildInstances();
+  }
+}
+
+/* ---------------- Player / controls & physics ---------------- */
+// player.pos.y is FEET height
+const player = {
+  pos: RESPAWN_POS.clone(),
+  vel: new THREE.Vector3(),
+  yaw: 0, pitch: 0,
+  speed: 5,
+  radius: 0.28,
+  height: 1.75,
+  onGround: false
+};
+const keys = {};
+window.addEventListener('keydown', e => keys[e.key.toLowerCase()] = true);
+window.addEventListener('keyup', e => keys[e.key.toLowerCase()] = false);
+
+canvas.addEventListener('click', () => { canvas.requestPointerLock(); });
+document.addEventListener('pointerlockchange', () => {});
+function onMouseMove(e){
+  if (document.pointerLockElement !== canvas) return;
+  player.yaw -= e.movementX * 0.0026;
+  player.pitch -= e.movementY * 0.0026;
+  player.pitch = Math.max(-Math.PI/2 + 0.1, Math.min(Math.PI/2 - 0.1, player.pitch));
+}
+document.addEventListener('mousemove', onMouseMove);
+
+/* mouse buttons: left=remove, right=place (contextmenu prevented) */
+canvas.addEventListener('mousedown', e => {
+  if (e.button === 0) { const hit = pickInstance(); if (hit) removeBlockAtInstance(hit.instanceId); }
+  else if (e.button === 2) { const hit = pickInstance(); if (hit) addBlockAdjacent(hit); }
+});
+canvas.addEventListener('contextmenu', e => e.preventDefault());
+
+/* ---------------- Collision helpers ---------------- */
+function worldToGridX(x){ return Math.floor((x + (SX*BLOCK_SIZE)/2) / BLOCK_SIZE); }
+function worldToGridZ(z){ return Math.floor((z + (SZ*BLOCK_SIZE)/2) / BLOCK_SIZE); }
+function worldToGridY(y){ return Math.floor(y / BLOCK_SIZE); }
+function hasBlockAtGrid(gx,gy,gz){
+  if (!inside(gx,gy,gz)) return false;
+  return grid[idx(gx,gy,gz)] !== 0;
+}
+// test AABB vs blocks overlapping; returns first colliding block coords or null
+function findCollidingBlock(aabbMin, aabbMax){
+  const minGX = Math.floor((aabbMin.x + (SX*BLOCK_SIZE)/2) / BLOCK_SIZE);
+  const maxGX = Math.floor((aabbMax.x + (SX*BLOCK_SIZE)/2) / BLOCK_SIZE);
+  const minGZ = Math.floor((aabbMin.z + (SZ*BLOCK_SIZE)/2) / BLOCK_SIZE);
+  const maxGZ = Math.floor((aabbMax.z + (SZ*BLOCK_SIZE)/2) / BLOCK_SIZE);
+  const minGY = Math.floor(aabbMin.y / BLOCK_SIZE);
+  const maxGY = Math.floor((aabbMax.y - 1e-6) / BLOCK_SIZE); // subtract epsilon to avoid top-touch ambiguity
+  for (let gx = minGX; gx <= maxGX; gx++){
+    for (let gz = minGZ; gz <= maxGZ; gz++){
+      for (let gy = minGY; gy <= maxGY; gy++){
+        if (inside(gx,gy,gz) && grid[idx(gx,gy,gz)]) {
+          // block aabb in world coords
+          const bMin = new THREE.Vector3((gx - SX/2)*BLOCK_SIZE, gy*BLOCK_SIZE, (gz - SZ/2)*BLOCK_SIZE);
+          const bMax = new THREE.Vector3(bMin.x + BLOCK_SIZE, bMin.y + BLOCK_SIZE, bMin.z + BLOCK_SIZE);
+          // AABB overlap test:
+          if (!(aabbMax.x <= bMin.x || aabbMin.x >= bMax.x || aabbMax.y <= bMin.y || aabbMin.y >= bMax.y || aabbMax.z <= bMin.z || aabbMin.z >= bMax.z)){
+            return { gx, gy, gz, bMin, bMax };
+          }
+        }
+      }
+    }
+  }
+  return null;
+}
+
+/* ---------------- Resize ---------------- */
+function resize() {
+  const w = canvas.clientWidth; const h = canvas.clientHeight;
+  if (canvas.width !== w || canvas.height !== h) {
+    renderer.setSize(w, h, false);
+    camera.aspect = w / h; camera.updateProjectionMatrix();
+  }
+}
+window.addEventListener('resize', resize);
+
+/* ---------------- Respawn ---------------- */
+function respawn() {
+  player.pos.copy(RESPAWN_POS);
+  player.vel.set(0,0,0);
+  player.onGround = false;
+}
+
+/* ---------------- Animation loop with physics ---------------- */
+const clock = new THREE.Clock();
+const tmpAABBMin = new THREE.Vector3();
+const tmpAABBMax = new THREE.Vector3();
+function animate() {
+  resize();
+  const dt = Math.min(clock.getDelta(), 0.05);
+// ---- Day/Night time update (replaced with stars & moon support) ----
+timeOfDay += (dt * 24.0) / DAY_DURATION; // advance hours
+if (timeOfDay >= 24) timeOfDay -= 24;
+
+// compute sun angle (0..24 maps to 0..2PI)
+const angle = (timeOfDay / 24.0) * Math.PI * 2.0;
+
+// sun position around the scene
+const sunDistance = 50;
+const sx = Math.cos(angle) * sunDistance;
+const sy = Math.sin(angle) * sunDistance;
+const sz = Math.sin(angle * 0.5) * (sunDistance * 0.3);
+sunLight.position.set(sx, sy, sz);
+sunLight.target.position.set(0, 0, 0);
+sunLight.target.updateMatrixWorld();
+
+// brightness depends on sun height (sy). map sy from [-1..1] to [0..1]
+const sunHeightRaw = sy / sunDistance; // in [-1..1]
+const sunHeight = THREE.MathUtils.clamp((sunHeightRaw + 0.0), 0, 1);
+
+// Sun light intensity (stronger at day)
+sunLight.intensity = THREE.MathUtils.lerp(0.0, 1.0, sunHeight);
+
+// Ambient: a little bit of base light at night so it isn't pitch black
+ambientLight.intensity = THREE.MathUtils.lerp(0.25, 0.85, sunHeight);
+
+// tint the sun during sunrise/sunset
+const sunColorDay = new THREE.Color(0xffffff);
+const sunColorSunset = new THREE.Color(0xffcc66);
+sunLight.color.copy(sunColorDay).lerp(sunColorSunset, Math.max(0, 0.7 - sunHeight));
+
+// change sky color: day -> sunset -> night
+const skyColor = new THREE.Color();
+if (sunHeight > 0.12) {
+  const t = THREE.MathUtils.smoothstep(sunHeight, 0.12, 1.0);
+  skyColor.copy(sunsetSky).lerp(daySky, t);
+} else {
+  const t = THREE.MathUtils.smoothstep(sunHeight, 0.0, 0.12);
+  skyColor.copy(nightSky).lerp(sunsetSky, t);
+}
+scene.background.copy(skyColor);
+
+// --- Moon: opposite side of sun (angle + PI) and moonlight control ---
+const moonAngle = angle + Math.PI;
+const moonDistance = 45;
+const mx = Math.cos(moonAngle) * moonDistance;
+const my = Math.sin(moonAngle) * moonDistance;
+const mz = Math.sin(moonAngle * 0.5) * (moonDistance * 0.2);
+moonMesh.position.set(mx, my, mz);
+
+// moon points to world center (so moonlight points down toward scene)
+moonLight.position.set(mx, my, mz);
+moonLight.target.position.set(0, 0, 0);
+moonLight.target.updateMatrixWorld();
+
+// moon "height" similar mapping (1 when high in sky)
+const moonHeightRaw = my / moonDistance;
+const moonHeight = THREE.MathUtils.clamp((moonHeightRaw + 1) / 2, 0, 1); // map [-1..1] -> [0..1]
+// moon light intensity peaks when sun is down (so scale by 1 - sunHeight)
+const moonBase = THREE.MathUtils.lerp(0.0, 0.7, moonHeight);
+moonLight.intensity = moonBase * (1.0 - sunHeight);
+
+// Slight bluish tint for moonlight
+moonLight.color.setHex(0xddeeff);
+
+// Moon mesh emissive intensity: a little brighter when high
+moonMat.emissiveIntensity = 0.5 + 0.8 * moonHeight;
+
+// --- Stars: fade in when sun is down ---
+const starFade = THREE.MathUtils.clamp((1.0 - sunHeight) * 1.6, 0.0, 1.0);
+starsMat.opacity = starFade;
+starsMat.needsUpdate = true;
+
+// optional: make stars slightly twinkle by scaling material size
+starsMat.size = 1.0 + 0.7 * (Math.sin(timeOfDay * 10.0) * 0.5 + 0.5) * (starFade);
+starsMat.needsUpdate = true;
+
+// make sure moon visibility matches (don't show moon when sun is high)
+moonMesh.visible = (sunHeight < 0.7);
+moonLight.visible = (moonLight.intensity > 0.0001);
+// -------------------------------------------------------------------
+
+// update the visible clock in the UI
+const hour = Math.floor(timeOfDay);
+const minute = Math.floor((timeOfDay - hour) * 60);
+document.getElementById('time').textContent = hour.toString().padStart(2,'0') + ':' + minute.toString().padStart(2,'0');
+
+
+  // horizontal input
+  const forward = new THREE.Vector3();
+  if (keys['w']) forward.z -= 1; if (keys['s']) forward.z += 1;
+  if (keys['a']) forward.x -= 1; if (keys['d']) forward.x += 1;
+  if (forward.lengthSq() > 0) forward.normalize();
+  const euler = new THREE.Euler(0, player.yaw, 0);
+  forward.applyEuler(euler);
+
+  // desired horizontal movement (separate axis moves for sliding)
+  const desiredVelX = forward.x * player.speed;
+  const desiredVelZ = forward.z * player.speed;
+
+  // apply gravity
+  player.vel.y -= 9.8 * dt;
+
+  // Jump
+  if (keys[' '] && player.onGround) { player.vel.y = 6.0; player.onGround = false; }
+
+  // --- Horizontal movement X axis ---
+  let newX = player.pos.x + desiredVelX * dt;
+  // build AABB at candidate X (keep same Z and Y)
+  tmpAABBMin.set(newX - player.radius, player.pos.y, player.pos.z - player.radius);
+  tmpAABBMax.set(newX + player.radius, player.pos.y + player.height, player.pos.z + player.radius);
+  let coll = findCollidingBlock(tmpAABBMin, tmpAABBMax);
+  if (!coll) {
+    player.pos.x = newX;
+  } else {
+    // collide: don't move on X (simple)
+    // optionally slide: try small step away — we just block X movement
+  }
+
+  // --- Horizontal movement Z axis ---
+  let newZ = player.pos.z + desiredVelZ * dt;
+  tmpAABBMin.set(player.pos.x - player.radius, player.pos.y, newZ - player.radius);
+  tmpAABBMax.set(player.pos.x + player.radius, player.pos.y + player.height, newZ + player.radius);
+  coll = findCollidingBlock(tmpAABBMin, tmpAABBMax);
+  if (!coll) {
+    player.pos.z = newZ;
+  } else {
+    // blocked on Z
+  }
+
+  // --- Vertical movement ---
+  const newY = player.pos.y + player.vel.y * dt;
+  tmpAABBMin.set(player.pos.x - player.radius, newY, player.pos.z - player.radius);
+  tmpAABBMax.set(player.pos.x + player.radius, newY + player.height, player.pos.z + player.radius);
+  coll = findCollidingBlock(tmpAABBMin, tmpAABBMax);
+  if (!coll) {
+    player.pos.y = newY;
+    player.onGround = false;
+  } else {
+    // collided. need to resolve vertical collision (ceiling or floor)
+    // if moving down -> landed on top of block
+    if (player.vel.y <= 0) {
+      // set feet to block top
+      player.pos.y = coll.bMax ? (coll.bMax.y) : (coll.bMin.y + BLOCK_SIZE); // fallback
+      // better compute block top in world coords
+      const blockTop = coll.bMin.y + BLOCK_SIZE;
+      player.pos.y = blockTop;
+      player.vel.y = 0;
+      player.onGround = true;
+    } else {
+      // moving up - hit ceiling: place player just below block
+      const blockBottom = coll.bMin.y;
+      player.pos.y = blockBottom - player.height - 1e-4;
+      player.vel.y = 0;
+    }
+  }
+
+  // If player somehow went outside world bounds horizontally or below fall death, respawn
+  const gridX = Math.floor((player.pos.x + (SX*BLOCK_SIZE)/2) / BLOCK_SIZE);
+  const gridZ = Math.floor((player.pos.z + (SZ*BLOCK_SIZE)/2) / BLOCK_SIZE);
+  if (player.pos.y < FALL_DEATH_Y || gridX < -5 || gridX > SX+5 || gridZ < -5 || gridZ > SZ+5) {
+    respawn();
+  }
+
+  // update camera from player
+  camera.position.set(player.pos.x, player.pos.y + player.height * 0.85, player.pos.z);
+  camera.rotation.set(player.pitch, player.yaw, 0, 'YXZ');
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(animate);
+}
+
+/* ---------------- Controls/UI ---------------- */
+document.getElementById('regen').addEventListener('click', generateTerrain);
+
+/* ---------------- Init ---------------- */
+generateTerrain();
+respawn();
+animate();
+</script>
+</body>
+</html>
