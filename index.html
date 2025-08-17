@@ -473,7 +473,12 @@ function generateIslandsOnly() {
    ================================================================ */
 const player = { pos: RESPAWN_POS.clone(), vel: new THREE.Vector3(), yaw:0, pitch:0, speed:5, radius:0.28, height:1.75, onGround:false };
 const keys = {};
-window.addEventListener('keydown', e => { keys[e.key.toLowerCase()] = true; if (e.key === ' ' && player.onGround) player.vel.y = 6; if (e.key >= '1' && e.key <= '6') selectHotbar(parseInt(e.key)); });
+window.addEventListener('keydown', e => {
+  keys[e.key.toLowerCase()] = true;
+  if (e.key === ' ' && player.onGround) player.vel.y = 6;
+  if (e.key >= '1' && e.key <= '6') selectHotbar(parseInt(e.key, 10) - 1);
+});
+
 window.addEventListener('keyup', e => { keys[e.key.toLowerCase()] = false; });
 
 canvas.addEventListener('click', () => { canvas.requestPointerLock(); });
