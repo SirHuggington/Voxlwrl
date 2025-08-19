@@ -3,13 +3,15 @@
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>Tiny Voxel World — Minecrafty (Improved)</title>
+<title>Tiny Voxel World — Minecrafty (TNT Added)</title>
 <style>
   html,body{height:100%;margin:0;background:#0b1020;color:#ddd;font-family:Inter,system-ui,Arial}
   #wrap{height:100vh;display:flex;align-items:stretch}
   #canvasWrap{flex:1;position:relative}
   canvas{display:block;width:100%;height:100%}
-  #ui{position:absolute;left:12px;top:12px;z-index:5;background:rgba(0,0,0,0.28);padding:8px;border-radius:6px}
+  #controls{transition:opacity 1s ease;opacity:1}
+#controls.fade{opacity:0}
+#ui{position:absolute;left:12px;top:12px;z-index:5;background:rgba(0,0,0,0.28);padding:8px;border-radius:6px}
   #cross{position:absolute;left:50%;top:50%;width:18px;height:18px;margin:-9px 0 0 -9px;pointer-events:none;z-index:4}
   #cross:after{content:'';position:absolute;left:50%;top:50%;width:2px;height:2px;margin:-1px 0 0 -1px;background:white;border-radius:50%}
   button{margin-left:6px}
@@ -29,7 +31,7 @@
   <div id="canvasWrap">
     <canvas id="c"></canvas>
     <div id="ui">
-      WASD move • Space jump • Click to lock mouse • Hold left-click to mine • Right click = place selected
+      <div id="controls">WASD move • Space jump • Click to lock mouse • Hold left-click to mine • Right click = place selected</div>
       <button id="regen">Regenerate</button>
       <div id="objective">Objective: Place 25 blocks to activate the beacon</div>
       <div id="hint">Placed: <span id="placedCount">0</span> • Blocks: <span id="count">0</span> • Time: <span id="time">12:00</span></div>
@@ -47,10 +49,11 @@
 /* ================================================================
    CONFIG + WORLD SIZE
    ================================================================ */
-const SX = 64, SY = 18, SZ = 64; // grid dims (bigger)
+const SX = 128, SY = 48, SZ = 128; // much bigger grid (X, Y, Z)
 const BLOCK_SIZE = 1;
-const FALL_DEATH_Y = -12;
+const FALL_DEATH_Y = -48; // fall death threshold (set lower because world is taller)
 const RESPAWN_POS = new THREE.Vector3(0, 5, 0);
+
 
 /* BLOCK TYPES */
 const BT = {
@@ -60,9 +63,10 @@ const BT = {
   STONE: 3,
   WOOD: 4,
   LEAVES: 5,
-  TORCH: 6
+  TORCH: 6,
+  TNT: 7
 };
-const BLOCK_NAMES = ['Empty','Grass','Dirt','Stone','Wood','Leaves','Torch'];
+const BLOCK_NAMES = ['Empty','Grass','Dirt','Stone','Wood','Leaves','Torch','TNT'];
 
 /* ================================================================
    THREE SETUP
@@ -73,8 +77,64 @@ renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x86c7ff);
 scene.fog = new THREE.FogExp2(0x86c7ff, 0.0025);
-const camera = new THREE.PerspectiveCamera(70, 2, 0.1, 500);
-camera.position.set(0, 6, 12);
+const camera = new THREE.PerspectiveCamera(70, 2, 0.1, 1500);
+camera.position.set(0, 12, 24);
+// --- FIRST-PERSON PICKAXE (simple hand-held tool) ---
+const axe = new THREE.Group();
+
+// handle (wood)
+const pickHandle = new THREE.Mesh(
+  new THREE.CylinderGeometry(0.035, 0.035, 0.95, 10),
+  new THREE.MeshStandardMaterial({ color: 0x6b4a2b, metalness: 0.05, roughness: 0.8 })
+);
+pickHandle.rotation.z = Math.PI/2;
+pickHandle.position.set(0.08, -0.18, -0.6);
+axe.add(pickHandle);
+
+// metal head center (small block connecting prongs)
+const headCenter = new THREE.Mesh(
+  new THREE.BoxGeometry(0.12, 0.12, 0.22),
+  new THREE.MeshStandardMaterial({ color: 0x333333, metalness: 0.9, roughness: 0.35 })
+);
+headCenter.position.set(0.36, -0.14, -0.5);
+axe.add(headCenter);
+
+// left prong (point)
+const prongLeft = new THREE.Mesh(
+  new THREE.BoxGeometry(0.06, 0.36, 0.12),
+  new THREE.MeshStandardMaterial({ color: 0x444444, metalness: 0.9, roughness: 0.28 })
+);
+prongLeft.position.set(0.36, -0.14, -0.5);
+prongLeft.rotation.set(0.05, 0.36, -0.22);
+prongLeft.translateZ(-0.08);
+axe.add(prongLeft);
+
+// right prong (mirror)
+const prongRight = prongLeft.clone();
+prongRight.rotation.set(-0.05, -0.36, 0.22);
+prongRight.position.set(0.36, -0.14, -0.5);
+prongRight.translateZ(0.08);
+axe.add(prongRight);
+
+// small leather grip (visual)
+const grip = new THREE.Mesh(
+  new THREE.CylinderGeometry(0.04, 0.04, 0.18, 8),
+  new THREE.MeshStandardMaterial({ color: 0x3f2f21, metalness: 0.02, roughness: 0.9 })
+);
+grip.rotation.z = Math.PI/2;
+grip.position.set(0.14, -0.15, -0.55);
+axe.add(grip);
+
+// scale and visibility
+axe.scale.set(1.0, 1.0, 1.0);
+axe.visible = true;
+
+// attach to camera so it follows the player's view
+camera.add(axe);
+axe.rotation.set(-0.6, 0.2, 0.0);   // resting pose
+axe.position.set(0, 0, 0);          // child-of-camera local coords
+
+
 
 const sunLight = new THREE.DirectionalLight(0xffffff, 1.0); sunLight.position.set(5,10,7); scene.add(sunLight);
 const ambientLight = new THREE.AmbientLight(0x888888, 0.6); scene.add(ambientLight);
@@ -83,7 +143,9 @@ const ambientLight = new THREE.AmbientLight(0x888888, 0.6); scene.add(ambientLig
    DAY/NIGHT + MOON + STARS
    ================================================================ */
 const daySky = new THREE.Color(0x86c7ff), sunsetSky = new THREE.Color(0xffb86b), nightSky = new THREE.Color(0x081028);
-const DAY_DURATION = 60; let timeOfDay = 12.0;
+const DAY_DURATION = 300; // full day = 300 seconds = 5 minutes
+let timeOfDay = 12.0;
+
 
 const moonGeom = new THREE.SphereGeometry(2.0,16,12);
 const moonMat = new THREE.MeshStandardMaterial({ color:0xffffff, emissive:0xeef6ff, emissiveIntensity:0.9, roughness:0.9 });
@@ -149,14 +211,39 @@ const leafTex = makeCanvasTexture((ctx,s)=>{
   }
 });
 
+const tntTex = makeCanvasTexture((ctx,s)=>{
+  ctx.fillStyle = '#b42020'; ctx.fillRect(0,0,s,s);
+  ctx.fillStyle = '#ffeded';
+  ctx.fillRect(0, Math.floor(s*0.4), s, Math.floor(s*0.12));
+  ctx.fillStyle = '#ffeded';
+  ctx.font = Math.floor(s*0.22) + 'px sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText('TNT', s/2, s*0.54);
+});
+
 /* ================================================================
    GRID STORAGE
    ================================================================ */
 const sizeGrid = SX * SY * SZ;
 let blocks = new Uint8Array(sizeGrid); // values = BT.*
 let playerPlaced = new Uint8Array(sizeGrid); // 0/1 for whether player placed this block
+let tntLit = new Uint8Array(sizeGrid); // 1 if a tnt block is currently lit
+let tntTimers = new Int32Array(sizeGrid); // timeout ids (non-zero)
 function idx(x,y,z){ return (y*SZ + z)*SX + x; }
 function inside(x,y,z){ return x>=0 && x<SX && y>=0 && y<SY && z>=0 && z<SZ; }
+// Finds the topmost walkable block at grid x, z (i.e., the "surface" of the terrain)
+function getSurfaceY(gx, gz) {
+  for (let y = SY-2; y >= 0; y--) {
+    if (
+      inside(gx, y, gz) &&
+      blocks[idx(gx, y, gz)] !== BT.NONE &&
+      blocks[idx(gx, y+1, gz)] === BT.NONE
+    ) {
+      return y;
+    }
+  }
+  return null;
+}
 
 /* ================================================================
    INSTANCED BLOCKS PER TYPE
@@ -175,13 +262,14 @@ function makeInstancedForType(type, material, maxCount = SX*SY*SZ){
   return m;
 }
 
-instancedMeshes[BT.GRASS] = makeInstancedForType(BT.GRASS, new THREE.MeshStandardMaterial({ map: grassTex }));
-instancedMeshes[BT.DIRT] = makeInstancedForType(BT.DIRT, new THREE.MeshStandardMaterial({ map: dirtTex }));
-instancedMeshes[BT.STONE] = makeInstancedForType(BT.STONE, new THREE.MeshStandardMaterial({ map: stoneTex }));
-instancedMeshes[BT.WOOD] = makeInstancedForType(BT.WOOD, new THREE.MeshStandardMaterial({ map: woodTex }));
+
+instancedMeshes[BT.GRASS]  = makeInstancedForType(BT.GRASS,  new THREE.MeshStandardMaterial({ map: grassTex }));
+instancedMeshes[BT.DIRT]   = makeInstancedForType(BT.DIRT,   new THREE.MeshStandardMaterial({ map: dirtTex }));
+instancedMeshes[BT.STONE]  = makeInstancedForType(BT.STONE,  new THREE.MeshStandardMaterial({ map: stoneTex }));
+instancedMeshes[BT.WOOD]   = makeInstancedForType(BT.WOOD,   new THREE.MeshStandardMaterial({ map: woodTex }));
 instancedMeshes[BT.LEAVES] = makeInstancedForType(BT.LEAVES, new THREE.MeshStandardMaterial({ map: leafTex, transparent:true, opacity:0.96 }));
-// torches are not boxes visually but we use small cube instanced + separate light entity list
-instancedMeshes[BT.TORCH] = makeInstancedForType(BT.TORCH, new THREE.MeshStandardMaterial({ color:0xffcc66, emissive:0xffcc88, emissiveIntensity:0.9 }));
+instancedMeshes[BT.TORCH]  = makeInstancedForType(BT.TORCH,  new THREE.MeshStandardMaterial({ color:0xffcc66, emissive:0xffcc88, emissiveIntensity:0.9 }));
+instancedMeshes[BT.TNT]    = makeInstancedForType(BT.TNT,    new THREE.MeshStandardMaterial({ map: tntTex, emissive:0x551111, emissiveIntensity:0.0 }));
 
 function clearAllInstanceMaps(){
   for (const t in instancedMeshes){
@@ -260,7 +348,7 @@ let placedBlocks = 0;
 const MAX_PLACED = 400; // safety cap
 const inventory = {};
 for (let k in BT) inventory[BT[k]] = 0; // counts per type
-inventory[BT.GRASS] = 0; inventory[BT.DIRT]=0; inventory[BT.STONE]=0; inventory[BT.WOOD]=0; inventory[BT.LEAVES]=0; inventory[BT.TORCH]=0;
+inventory[BT.GRASS] = 0; inventory[BT.DIRT]=0; inventory[BT.STONE]=0; inventory[BT.WOOD]=0; inventory[BT.TORCH]=0; inventory[BT.TNT]=0;
 
 function updatePlacedBadge(){ document.getElementById('placedCount').textContent = placedBlocks; }
 
@@ -272,12 +360,17 @@ function removeBlockAt(hitInfo){
   if (!btype) return;
   // decrement placed count only if it was player-placed
   if (playerPlaced[gidx]) { playerPlaced[gidx]=0; if (placedBlocks>0) placedBlocks--; }
+  // if it was a lit TNT, cancel its timer
+  if (btype === BT.TNT && tntTimers[gidx]) { clearTimeout(tntTimers[gidx]); tntTimers[gidx]=0; }
   // add to inventory
   inventory[btype] = (inventory[btype]||0) + 1;
   spawnBreakParticlesFromGridIndex(gidx);
   blocks[gidx] = BT.NONE;
+  // remove any small flame lights attached
+  removeTNTLightAt(gidx);
   rebuildInstances();
-  playTone(200, 0.06);
+  playBreakSound();
+
 }
 
 /* addBlockAdjacent uses currently selected block type */
@@ -299,6 +392,7 @@ function addBlockAdjacent(hitInfo){
     playTone(880, 0.03);
     // if torch, spawn a light
     if (selectedBlockType === BT.TORCH) spawnTorchAt(ax,ay,az);
+    if (selectedBlockType === BT.TNT) igniteTNTByGrid(ax,ay,az);
     checkBridgeGoal();
   }
 }
@@ -360,6 +454,265 @@ function removeTorchAtGridIndex(gidx){
 }
 
 /* ================================================================
+   ANIMAL NPCs: Cute Hopping Bunnies
+   ================================================================ */
+const bunnies = [];
+const BUNNY_COUNT = 8; // Change this for more/fewer bunnies
+const BUNNY_RADIUS = 0.18;
+const BUNNY_HEIGHT = 0.38;
+
+function makeBunnyMesh() {
+  const group = new THREE.Group();
+  // Body
+  const body = new THREE.Mesh(
+    new THREE.SphereGeometry(0.13, 18, 14),
+    new THREE.MeshStandardMaterial({ color: 0xffffff })
+  );
+  body.position.set(0,0.08,0); group.add(body);
+
+  // Head
+  const head = new THREE.Mesh(
+    new THREE.SphereGeometry(0.17, 22, 16),
+    new THREE.MeshStandardMaterial({ color: 0xffffff })
+  );
+  head.position.set(0,0.22,0.02); group.add(head);
+
+  // Ears
+  for(let i=-1;i<=1;i+=2){
+    const ear = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.036,0.027,0.23,14),
+      new THREE.MeshStandardMaterial({ color: 0xffffff })
+    );
+    ear.position.set(0.07*i,0.37,0.00); ear.rotation.x = Math.PI/2.08; ear.rotation.z = i*0.14;
+    group.add(ear);
+
+    // Inner ear
+    const inn = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.019,0.015,0.15,12),
+      new THREE.MeshStandardMaterial({ color: 0xffe5f3, roughness:0.7 })
+    );
+    inn.position.set(0.07*i,0.37,0.01); inn.rotation.x = Math.PI/2.08; inn.rotation.z = i*0.14;
+    group.add(inn);
+  }
+
+  // Eyes
+  for(let i=-1;i<=1;i+=2){
+    const eye = new THREE.Mesh(
+      new THREE.SphereGeometry(0.022, 8, 6),
+      new THREE.MeshStandardMaterial({ color: 0x222222 })
+    );
+    eye.position.set(0.052*i,0.27,0.155); group.add(eye);
+  }
+
+  // Blush
+  for(let i=-1;i<=1;i+=2){
+    const blush = new THREE.Mesh(
+      new THREE.SphereGeometry(0.021, 7, 5),
+      new THREE.MeshStandardMaterial({ color: 0xffb6d5, roughness:0.75 })
+    );
+    blush.position.set(0.07*i,0.23,0.13); group.add(blush);
+  }
+
+  // Nose
+  const nose = new THREE.Mesh(
+    new THREE.SphereGeometry(0.013, 7, 5),
+    new THREE.MeshStandardMaterial({ color: 0xffb3c6 })
+  );
+  nose.position.set(0,0.245,0.175); group.add(nose);
+
+  // Mouth (tiny V)
+  const mouthShape = new THREE.Shape();
+  mouthShape.moveTo(-0.01, 0); mouthShape.quadraticCurveTo(0,-0.012, 0.01,0);
+  const mouthGeom = new THREE.BufferGeometry().setFromPoints(mouthShape.getPoints(8));
+  const mouthMat = new THREE.LineBasicMaterial({ color: 0x884455 });
+  const mouth = new THREE.Line(mouthGeom, mouthMat);
+  mouth.position.set(0,0.233,0.175); group.add(mouth);
+
+  // Tail
+  const tail = new THREE.Mesh(
+    new THREE.SphereGeometry(0.035, 8, 7),
+    new THREE.MeshStandardMaterial({ color: 0xfafafa })
+  );
+  tail.position.set(0,0.07,-0.11); group.add(tail);
+
+  return group;
+}
+
+function findGrassSpots() {
+  const spots = [];
+  for (let x = 0; x < SX; x++) {
+    for (let z = 0; z < SZ; z++) {
+      let y = getSurfaceY(x, z);
+      if (y !== null && blocks[idx(x, y, z)] === BT.GRASS) {
+        spots.push({x, y, z});
+      }
+    }
+  }
+  return spots;
+}
+
+function spawnBunnies() {
+  for (const b of bunnies) scene.remove(b.mesh);
+  bunnies.length = 0;
+  const spots = findGrassSpots();
+  for (let i=0; i<BUNNY_COUNT && spots.length>0; i++) {
+    const spotIdx = Math.floor(Math.random()*spots.length);
+    const {x, z} = spots.splice(spotIdx,1)[0]; // ignore y from spots
+    const y = getSurfaceY(x, z);
+    if (y === null) continue;
+    const wx = (x - SX/2) * BLOCK_SIZE + BLOCK_SIZE/2;
+    const wy = (y + 1) * BLOCK_SIZE;
+    const wz = (z - SZ/2) * BLOCK_SIZE + BLOCK_SIZE/2;
+    const mesh = makeBunnyMesh();
+    mesh.position.set(wx, wy, wz);
+    scene.add(mesh);
+    bunnies.push({
+      mesh,
+      pos: {x: wx, y: wy, z: wz},
+      dir: Math.random()*Math.PI*2,
+      hopTime: Math.random()*0.8,
+      wanderTimer: 0.5+Math.random()*2.5,
+      speed: 0.7+Math.random()*0.3,
+      baseY: wy
+    });
+  }
+}
+
+// Patch worldgen to also respawn bunnies
+const _oldGenerateIslandsOnly = generateIslandsOnly;
+generateIslandsOnly = function() {
+  _oldGenerateIslandsOnly();
+  spawnBunnies();
+};
+
+/* ================================================================
+   TNT: ignite / explode
+   ================================================================ */
+const tntLights = []; // small point lights for lit TNTs
+const explosionEffects = []; // sphere meshes that expand and fade
+
+function igniteTNTByGrid(gx,gy,gz, fuse=2200){
+  const gidx = idx(gx,gy,gz);
+  if (!inside(gx,gy,gz) || blocks[gidx] !== BT.TNT) return;
+  if (tntLit[gidx]) return; // already lit
+  tntLit[gidx] = 1;
+  // little glow
+  const wx = (gx - SX/2)*BLOCK_SIZE + BLOCK_SIZE/2;
+  const wy = gy*BLOCK_SIZE + BLOCK_SIZE/2 + 0.3;
+  const wz = (gz - SZ/2)*BLOCK_SIZE + BLOCK_SIZE/2;
+  const p = new THREE.PointLight(0xff7744, 1.2, 6, 2);
+  p.position.set(wx, wy, wz);
+  scene.add(p);
+  tntLights.push({ light: p, gidx });
+  // subtle emissive on instanced mesh (we just redraw all instances on state change)
+  if (instancedMeshes[BT.TNT] && instancedMeshes[BT.TNT].material) instancedMeshes[BT.TNT].material.emissiveIntensity = 0.6;
+  playTone(1200,0.06);
+  // schedule explosion
+  const to = setTimeout(()=>{ explodeAtGridIndex(gidx); }, fuse);
+  tntTimers[gidx] = to;
+}
+
+function removeTNTLightAt(gidx){
+  for (let i=tntLights.length-1;i>=0;i--){ if (tntLights[i].gidx === gidx){ scene.remove(tntLights[i].light); tntLights.splice(i,1); } }
+  if (instancedMeshes[BT.TNT] && instancedMeshes[BT.TNT].material) instancedMeshes[BT.TNT].material.emissiveIntensity = 0.0;
+}
+
+function clearAllTNT(){
+  for (let i=0;i<sizeGrid;i++){ if (tntTimers[i]) { clearTimeout(tntTimers[i]); tntTimers[i]=0; } }
+  for (const t of tntLights) scene.remove(t.light); tntLights.length = 0; tntLit.fill(0);
+}
+
+let cameraShakeTime = 0, cameraShakeIntensity = 0;
+function explodeAtGridIndex(gidx){
+  if (gidx < 0) return;
+  // prevent double explosion
+  if (!blocks[gidx] || blocks[gidx] !== BT.TNT) return;
+  // remove the TNT itself first
+  const gx = gidx % SX; const rest = Math.floor(gidx / SX); const gz = rest % SZ; const gy = Math.floor(rest / SZ);
+  // huge radius for "vaporize island" effect — tuned for drama
+  const R = 10; // grid radius
+  const removed = [];
+  for (let dx=-R; dx<=R; dx++){
+    for (let dy=-R; dy<=R; dy++){
+      for (let dz=-R; dz<=R; dz++){
+        const nx = gx + dx, ny = gy + dy, nz = gz + dz;
+        if (!inside(nx,ny,nz)) continue;
+        const d2 = dx*dx + dy*dy + dz*dz;
+        if (d2 > R*R) continue;
+        const gi = idx(nx,ny,nz);
+        if (blocks[gi]){
+          // chain reaction: if another TNT, ignite it with a short random delay
+          if (blocks[gi] === BT.TNT && !tntLit[gi]){
+            setTimeout(()=>{ igniteTNTByGrid(nx,ny,nz, 800 + Math.random()*800); }, Math.random()*300);
+          }
+          removed.push(gi);
+        }
+      }
+    }
+  }
+  // remove blocks
+  for (const ri of removed){
+    const bt = blocks[ri];
+    blocks[ri] = BT.NONE;
+    playerPlaced[ri] = 0;
+    // clear timers if this was tnt
+    if (bt === BT.TNT && tntTimers[ri]) { clearTimeout(tntTimers[ri]); tntTimers[ri]=0; }
+    // spawn big debris for dramatic effect
+    spawnBreakParticlesFromGridIndex(ri);
+    removeTNTLightAt(ri);
+  }
+  // visual explosion effect
+  const wx = (gx - SX/2)*BLOCK_SIZE + BLOCK_SIZE/2;
+  const wy = gy*BLOCK_SIZE + BLOCK_SIZE/2;
+  const wz = (gz - SZ/2)*BLOCK_SIZE + BLOCK_SIZE/2;
+  const sphere = new THREE.Mesh(new THREE.SphereGeometry(0.5, 12, 8), new THREE.MeshStandardMaterial({ emissive:0xffaa66, emissiveIntensity:1.6, opacity:0.95, transparent:true, roughness:0.3 }));
+  sphere.position.set(wx, wy, wz);
+  sphere.userData = { life: 1.2, maxLife: 1.2, startScale:1.0 };
+  scene.add(sphere);
+  explosionEffects.push(sphere);
+  // audio + shake
+  playExplosionSound();
+  cameraShakeIntensity = Math.min(4.5, 3.0 + Math.sqrt(removed.length)/6);
+  cameraShakeTime = 0.9;
+  // final rebuild once all removals queued
+  rebuildInstances();
+}
+
+/* ================================================================
+   Explosion audio (simple noise+low-rumble) -- WebAudio
+   ================================================================ */
+let audioCtx = null;
+function ensureAudio(){ if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)(); }
+function playExplosionSound(){
+  try{
+    ensureAudio();
+    const ac = audioCtx;
+    const dur = 1.4;
+    // create white-noise buffer
+    const buf = ac.createBuffer(1, ac.sampleRate * 0.4, ac.sampleRate);
+    const data = buf.getChannelData(0);
+    for (let i=0;i<data.length;i++) data[i] = (Math.random()*2-1) * (1 - i/data.length);
+    const src = ac.createBufferSource(); src.buffer = buf;
+    const filt = ac.createBiquadFilter(); filt.type = 'lowpass'; filt.frequency.value = 1200;
+    const gain = ac.createGain(); gain.gain.value = 0.0001;
+    src.connect(filt); filt.connect(gain); gain.connect(ac.destination);
+    const now = ac.currentTime;
+    gain.gain.setValueAtTime(0.0001, now);
+    gain.gain.exponentialRampToValueAtTime(1.2, now + 0.02);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + dur);
+    src.start(now); src.stop(now + 0.4);
+    // low rumble (sine) for the body
+    const o = ac.createOscillator(); const g2 = ac.createGain();
+    o.type = 'sine'; o.frequency.value = 60; g2.gain.value = 0.0001;
+    o.connect(g2); g2.connect(ac.destination);
+    g2.gain.setValueAtTime(0.0001, now);
+    g2.gain.linearRampToValueAtTime(0.6, now + 0.12);
+    g2.gain.exponentialRampToValueAtTime(0.0001, now + dur);
+    o.start(now); o.stop(now + dur);
+  }catch(e){ }
+}
+
+/* ================================================================
    WATER PLANE
    ================================================================ */
 const water = new THREE.Mesh(new THREE.PlaneGeometry(SX*1.2, SZ*1.2), new THREE.MeshStandardMaterial({ color:0x2d9df0, transparent:true, opacity:0.35 }));
@@ -369,24 +722,36 @@ water.rotation.x = -Math.PI/2; water.position.y = 0.0; scene.add(water);
    ISLANDS GENERATION
    ================================================================ */
 const islandSpecs = [
-  { cx: 0, cz: 0, radius: 3.2, baseH: 1, hVar: 0 },
-  { cx: 25, cz: 0, radius: 4.8, baseH: 2, hVar: 2, goal:true },
-  { cx: -22, cz: -14, radius: 4.8, baseH: 2, hVar: 2 },
-  { cx: 18, cz: -18, radius: 5.2, baseH: 3, hVar: 2 },
-  { cx: -8, cz: 20, radius: 4.0, baseH: 2, hVar: 1 },
-  { cx: 26, cz: 12, radius: 3.6, baseH: 2, hVar: 2 },
-  { cx: -26, cz: 18, radius: 5.6, baseH: 3, hVar: 3 },
-  { cx: 6, cz: -30, radius: 4.6, baseH: 2, hVar: 2 },
-  { cx: 28, cz: -2, radius: 3.2, baseH: 1, hVar: 1 }
+  { cx: 0,   cz: 0,   radius: 6.0, baseH: 3, hVar: 2, elev: 0  },  // start island (ground)
+  { cx: -12, cz: -10, radius: 5.2, baseH: 2, hVar: 2, elev: 6  },  // slightly higher
+  { cx: 18,  cz: -8,  radius: 4.2, baseH: 2, hVar: 2, elev: 12 },  // higher level
+  { cx: 8,   cz: 18,  radius: 5.2, baseH: 3, hVar: 2, elev: 18 },  // even higher
+  { cx: -8,  cz: 20,  radius: 4.0, baseH: 2, hVar: 1, elev: 24 },
+  { cx: 26,  cz: 12,  radius: 3.6, baseH: 2, hVar: 2, elev: 30 },
+  { cx: -26, cz: 18,  radius: 5.6, baseH: 3, hVar: 3, elev: 36 },
+  { cx: 6,   cz: -30, radius: 4.6, baseH: 2, hVar: 2, elev: 30 },
+  { cx: 28,  cz: -2,  radius: 3.2, baseH: 1, hVar: 1, elev: 12 },
+  // New ground-level islands (existing)
+  { cx: -35, cz: -5,  radius: 4.8, baseH: 3, hVar: 2, elev: 0  },  // ground island west
+  { cx: 15,  cz: 35,  radius: 5.5, baseH: 4, hVar: 3, elev: 0  },  // ground island south
+  { cx: -20, cz: -28, radius: 4.2, baseH: 2, hVar: 2, elev: 0  },  // ground island northwest
+  // Three new ground-level islands
+  { cx: 35,  cz: 5,   radius: 4.5, baseH: 3, hVar: 2, elev: 0  },   // ground island east
+  { cx: -10, cz: 38,  radius: 5.0, baseH: 3, hVar: 2, elev: 0  },   // ground island far south
+  { cx: 28,  cz: -32, radius: 4.3, baseH: 2, hVar: 1, elev: 0  }    // ground island southeast
 ];
+
 
 let goalIslandCenterWorld = null; let goalReached = false;
 function generateIslandsOnly() {
   blocks.fill(BT.NONE);
   playerPlaced.fill(0);
+  tntLit.fill(0);
+  // clear decor
   decorGroup.clear();
-  // clear torches
+  // clear torches + tnt lights
   for (const t of torches) scene.remove(t.light); torches.length = 0;
+  clearAllTNT();
 
   const cxGrid = Math.floor(SX/2);
   const czGrid = Math.floor(SZ/2);
@@ -402,16 +767,18 @@ function generateIslandsOnly() {
         if (dist > r) continue;
         const localH = Math.max(1, Math.floor(sp.baseH + (1 - (dist / r)) * sp.hVar + (Math.random() * 0.6)));
         for (let dy = 0; dy < localH; dy++) {
-          const gx = centerGX + dx;
-          const gz = centerGZ + dz;
-          const gy = dy;
-          if (!inside(gx,gy,gz)) continue;
-          // layer: top grass, under = dirt, deeper = stone
-          const depth = dy;
-          if (depth === localH-1) blocks[idx(gx,gy,gz)] = BT.GRASS;
-          else if (depth >= Math.max(0, localH-3)) blocks[idx(gx,gy,gz)] = BT.DIRT;
-          else blocks[idx(gx,gy,gz)] = BT.STONE;
-        }
+  const gx = centerGX + dx;
+  const gz = centerGZ + dz;
+  // add island elevation so island stacks above ground
+  const gy = dy + (sp.elev || 0);
+  if (!inside(gx,gy,gz)) continue;
+  // layer: top grass, under = dirt, deeper = stone
+  const depth = dy;
+  if (depth === localH-1) blocks[idx(gx,gy,gz)] = BT.GRASS;
+  else if (depth >= Math.max(0, localH-3)) blocks[idx(gx,gy,gz)] = BT.DIRT;
+  else blocks[idx(gx,gy,gz)] = BT.STONE;
+}
+
       }
     }
 
@@ -476,7 +843,7 @@ const keys = {};
 window.addEventListener('keydown', e => {
   keys[e.key.toLowerCase()] = true;
   if (e.key === ' ' && player.onGround) player.vel.y = 6;
-  if (e.key >= '1' && e.key <= '6') selectHotbar(parseInt(e.key, 10) - 1);
+  if (e.key >= '1' && e.key <= '7') selectHotbar(parseInt(e.key, 10) - 1);
 });
 
 window.addEventListener('keyup', e => { keys[e.key.toLowerCase()] = false; });
@@ -490,6 +857,12 @@ canvas.addEventListener('mousedown', e => {
   if (e.button === 0) {
     const hit = updateHover();
     if (hit) {
+      // left-click on a TNT that's not lit will ignite it immediately
+      if (hit && blocks[hit.gidx] === BT.TNT && !tntLit[hit.gidx]) {
+        const gx = hit.gx, gy = hit.gy, gz = hit.gz;
+        igniteTNTByGrid(gx,gy,gz, 1600);
+        return;
+      }
       mining.active = true; mining.startTime = performance.now(); mining.target = hit; }
   } else if (e.button === 2) {
     const hit = updateHover(); if (hit) addBlockAdjacent(hit);
@@ -517,11 +890,52 @@ function updateCamera(dt){
 }
 
 /* ================================================================
-   AUDIO: simple tones for place/remove
+   AUDIO: simple tones for place/remove (re-usable)
    ================================================================ */
-let audioCtx = null;
-function ensureAudio(){ if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)(); }
-function playTone(freq=440, duration=0.05){ try { ensureAudio(); const o = audioCtx.createOscillator(); const g = audioCtx.createGain(); o.type = 'sine'; o.frequency.value = freq; g.gain.value = 0.06; o.connect(g); g.connect(audioCtx.destination); o.start(); g.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + duration); o.stop(audioCtx.currentTime + duration + 0.02); } catch(e) {} }
+function playBreakSound(){
+  try {
+    ensureAudio();
+    const now = audioCtx.currentTime;
+    const o = audioCtx.createOscillator();
+    const g = audioCtx.createGain();
+    // a quick square-ish hit with a dropping pitch
+    o.type = 'square';
+    o.frequency.setValueAtTime(700, now);
+    o.frequency.exponentialRampToValueAtTime(160, now + 0.12);
+    g.gain.setValueAtTime(0.0001, now);
+    g.gain.exponentialRampToValueAtTime(0.09, now + 0.008);
+    g.gain.exponentialRampToValueAtTime(0.0001, now + 0.18);
+    o.connect(g); g.connect(audioCtx.destination);
+    o.start(now); o.stop(now + 0.2);
+  } catch(e) {}
+}
+// --- original place-block tone (restored) ---
+function playTone(freq=440, duration=0.05){
+  try {
+    ensureAudio();
+    const o = audioCtx.createOscillator();
+    const g = audioCtx.createGain();
+    o.type = 'sine';
+    o.frequency.value = freq;
+    g.gain.value = 0.06;
+    o.connect(g);
+    g.connect(audioCtx.destination);
+    const now = audioCtx.currentTime;
+    // ramp the gain down to avoid clicks
+    g.gain.setValueAtTime(g.gain.value, now);
+    g.gain.exponentialRampToValueAtTime(0.0001, now + duration);
+    o.start(now);
+    o.stop(now + duration + 0.02);
+  } catch(e) {}
+}
+// ensure audio context is resumed after first user gesture (fixes silent audio in some browsers)
+window.addEventListener('pointerdown', () => {
+  try {
+    ensureAudio();
+    if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
+  } catch(e){}
+}, { once: true });
+
 
 /* ================================================================
    BRIDGE GOAL: beacon visual
@@ -579,10 +993,11 @@ function respawn(){ player.pos.copy(RESPAWN_POS); player.vel.set(0,0,0); player.
    ================================================================ */
 const hotbarEl = document.getElementById('hotbar');
 const miniInvEl = document.getElementById('miniInv');
-const HOTBAR_SLOTS = [BT.GRASS, BT.DIRT, BT.STONE, BT.WOOD, BT.TORCH, BT.LEAVES];
+// keep hotbar to 6 slots — we replaced Leaves with TNT so TNT is slot 6
+const HOTBAR_SLOTS = [BT.GRASS, BT.DIRT, BT.STONE, BT.WOOD, BT.TORCH, BT.LEAVES, BT.TNT];
 let hotbarSel = 0;
 function buildHotbar(){ hotbarEl.innerHTML=''; for (let i=0;i<HOTBAR_SLOTS.length;i++){ const s = document.createElement('div'); s.className='slot'+(i===hotbarSel?' sel':''); s.dataset.slot=i; s.innerHTML = `<div style="font-size:11px">${i+1}</div><div style="font-size:13px;margin-top:6px">${BLOCK_NAMES[HOTBAR_SLOTS[i]]}</div><span id="inv${i}"></span>`; s.addEventListener('click', ()=>selectHotbar(i)); hotbarEl.appendChild(s); } updateHotbarCounts(); }
-function updateHotbarCounts(){ for (let i=0;i<HOTBAR_SLOTS.length;i++){ const span = document.getElementById('inv'+i); if (span) span.textContent = inventory[HOTBAR_SLOTS[i]]>0?inventory[HOTBAR_SLOTS[i]]:''; const el = hotbarEl.children[i]; el.className = 'slot' + (i===hotbarSel?' sel':''); } miniInvEl.innerHTML = `Selected: <b>${BLOCK_NAMES[selectedBlockType]}</b> (keys 1-6) / Inventory: Grass ${inventory[BT.GRASS]} Dirt ${inventory[BT.DIRT]} Stone ${inventory[BT.STONE]} Wood ${inventory[BT.WOOD]} Torches ${inventory[BT.TORCH]}`; }
+function updateHotbarCounts(){ for (let i=0;i<HOTBAR_SLOTS.length;i++){ const span = document.getElementById('inv'+i); if (span) span.textContent = inventory[HOTBAR_SLOTS[i]]>0?inventory[HOTBAR_SLOTS[i]]:''; const el = hotbarEl.children[i]; el.className = 'slot' + (i===hotbarSel?' sel':''); } miniInvEl.innerHTML = `Selected: <b>${BLOCK_NAMES[selectedBlockType]}</b> (keys 1-7) / Inventory: Grass ${inventory[BT.GRASS]} Dirt ${inventory[BT.DIRT]} Stone ${inventory[BT.STONE]} Wood ${inventory[BT.WOOD]} Leaves ${inventory[BT.LEAVES]} Torches ${inventory[BT.TORCH]} TNT ${inventory[BT.TNT]}`; }
 function selectHotbar(i){ hotbarSel = i; selectedBlockType = HOTBAR_SLOTS[i]; buildHotbar(); }
 
 /* ================================================================
@@ -671,11 +1086,30 @@ function animate(){
   // animate debris
   for (let i = debris.length - 1; i >= 0; i--){ const d = debris[i]; d.userData.life -= dt; if (d.userData.life <= 0) { scene.remove(d); debris.splice(i,1); continue; } d.position.addScaledVector(d.userData.vel, dt * 10); d.userData.vel.y -= 9.8 * dt * 0.2; d.material.opacity = Math.max(0.02, d.userData.life / 1.2); if (d.material.transparent === false) d.material.transparent = true; }
 
+  // explosion effect update
+  for (let i = explosionEffects.length - 1; i >= 0; i--){ const e = explosionEffects[i]; e.userData.life -= dt; if (e.userData.life <= 0) { scene.remove(e); explosionEffects.splice(i,1); continue; } const p = 1 - (e.userData.life / e.userData.maxLife); e.scale.setScalar(e.userData.startScale + p * 12); e.material.emissiveIntensity = Math.max(0, 2.2 * (1-p)); e.material.opacity = Math.max(0.02, e.userData.life / e.userData.maxLife); }
+
   // hover update
   const h = updateHover();
 
   // mining feedback (show quick highlight progress)
   if (mining.active && mining.target){ const held = (performance.now() - mining.startTime)/1000; const p = Math.min(1, held / mining.duration); hoverBox.material.opacity = 0.9 + p*0.5; if (held >= mining.duration) { removeBlockAt(mining.target); mining.active=false; } }
+// --- simple axe swing animation tied to mining progress ---
+if (typeof axe !== 'undefined') {
+  if (mining.active) {
+    const held = (performance.now() - mining.startTime) / 1000;
+    const p = Math.min(1, held / mining.duration);
+    // swing forward when mining (sin curve for smooth motion)
+    const swing = Math.sin(p * Math.PI) * 1.0; // 0..1..0
+    axe.rotation.x = -0.6 + swing * 0.9; // forward swing
+    axe.rotation.y = 0.18 + Math.sin(p * Math.PI * 2) * 0.04; // slight twist
+  } else {
+    // relax back to resting pose
+    axe.rotation.x = THREE.MathUtils.lerp(axe.rotation.x, -0.6, 0.12);
+    axe.rotation.y = THREE.MathUtils.lerp(axe.rotation.y, 0.2, 0.12);
+  }
+}
+
 
   // update beacon pulse
   if (beacon.visible) beacon.material.emissiveIntensity = 0.7 + Math.abs(Math.sin(performance.now() * 0.002)) * 0.6;
@@ -685,6 +1119,80 @@ function animate(){
 
   // check goal reached
   if (goalReached && beacon.visible){ const d = new THREE.Vector3(player.pos.x - beacon.position.x, player.pos.y - beacon.position.y, player.pos.z - beacon.position.z); if (d.length() < 2.0){ flashObjectiveText("You reached the goal island — mission complete!"); beacon.visible=false; document.getElementById('objective').textContent = "Objective: Completed — congratulations!"; }}
+
+  // camera shake
+  if (cameraShakeTime > 0){
+    cameraShakeTime -= dt;
+    const s = cameraShakeIntensity * (cameraShakeTime / 0.9);
+    camera.position.x += (Math.random()-0.5) * s * 0.06;
+    camera.position.y += (Math.random()-0.5) * s * 0.04;
+    camera.position.z += (Math.random()-0.5) * s * 0.06;
+  }
+
+  // === Bunny NPCs: wander and hop ===
+  for (let i = 0; i < bunnies.length; i++) {
+  const b = bunnies[i];
+
+  // Always snap bunny to top surface at its current x,z
+  let gx = Math.round((b.pos.x + SX/2*BLOCK_SIZE - BLOCK_SIZE/2)/BLOCK_SIZE);
+  let gz = Math.round((b.pos.z + SZ/2*BLOCK_SIZE - BLOCK_SIZE/2)/BLOCK_SIZE);
+  let surfaceY = getSurfaceY(gx, gz);
+  if (surfaceY === null) {
+    // Fell through the world? Teleport bunny to a random valid spot
+    const spots = findGrassSpots();
+    if (spots.length > 0) {
+      const {x, z} = spots[Math.floor(Math.random()*spots.length)];
+      const y = getSurfaceY(x, z);
+      if (y !== null) {
+        b.pos.x = (x - SX/2) * BLOCK_SIZE + BLOCK_SIZE/2;
+        b.pos.z = (z - SZ/2) * BLOCK_SIZE + BLOCK_SIZE/2;
+        b.baseY = (y + 1) * BLOCK_SIZE;
+      }
+    }
+    continue;
+  }
+  b.baseY = (surfaceY + 1) * BLOCK_SIZE;
+
+  // Try to move forward
+  const moveDist = b.speed * dt;
+  const tryX = b.pos.x + Math.cos(b.dir) * moveDist;
+  const tryZ = b.pos.z + Math.sin(b.dir) * moveDist;
+
+  // Find surface at target x,z
+  let tgtGX = Math.round((tryX + SX/2*BLOCK_SIZE - BLOCK_SIZE/2)/BLOCK_SIZE);
+  let tgtGZ = Math.round((tryZ + SZ/2*BLOCK_SIZE - BLOCK_SIZE/2)/BLOCK_SIZE);
+  let tgtSurfaceY = getSurfaceY(tgtGX, tgtGZ);
+
+  // Only move if:
+  // - There is a valid surface at the target
+  // - Height difference is at most 1 (step up/down)
+  // - Space above is clear
+  if (
+    tgtSurfaceY !== null &&
+    Math.abs(tgtSurfaceY - surfaceY) <= 1 &&
+    blocks[idx(tgtGX, tgtSurfaceY+1, tgtGZ)] === BT.NONE &&
+    blocks[idx(tgtGX, tgtSurfaceY+2, tgtGZ)] === BT.NONE
+  ) {
+    b.pos.x = tryX;
+    b.pos.z = tryZ;
+    // Next loop, will snap to new surface at new x,z
+  } else {
+    // Obstacle or edge, turn away
+    b.dir += Math.PI + (Math.random()-0.5)*0.7;
+    b.wanderTimer = 0.5 + Math.random()*1;
+  }
+
+  // Hopping animation
+  b.hopTime += dt;
+  if (b.hopTime > 0.7) b.hopTime = 0;
+  const hopY = Math.sin((b.hopTime/0.7)*Math.PI)*0.16;
+  b.mesh.position.x = b.pos.x;
+  b.mesh.position.z = b.pos.z;
+  b.mesh.position.y = b.baseY + hopY;
+
+  // Face direction, add a little wiggle for cuteness
+  b.mesh.rotation.y = -b.dir + Math.PI/2 + Math.sin(performance.now()/470 + i)*0.1;
+}
 
   // render
   renderer.render(scene, camera);
@@ -709,6 +1217,13 @@ generateIslandsOnly();
 rebuildInstances();
 respawn();
 updatePlacedBadge();
+
+// Fade out controls after 10 seconds
+setTimeout(() => {
+  const controls = document.getElementById('controls');
+  if (controls) controls.classList.add('fade');
+}, 10000);
+
 animate();
 
 </script>
