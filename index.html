@@ -433,10 +433,43 @@ function spawnTreeAt(x,y,z, scale=1.0){
   decorGroup.add(trunk); decorGroup.add(leaves);
 }
 function spawnRockAt(x,y,z, scale=1){
-  const rock = new THREE.Mesh(new THREE.DodecahedronGeometry(0.5*scale,0), new THREE.MeshStandardMaterial({ color:0x666666 }));
-  rock.position.set(x,y+0.25*scale,z);
+  // create mesh (same look as before)
+  const rock = new THREE.Mesh(
+    new THREE.DodecahedronGeometry(0.5*scale, 0),
+    new THREE.MeshStandardMaterial({ color: 0x666666 })
+  );
+
+  // compute grid coords from world x,z (reverse of world->grid formula used elsewhere)
+  const gx = Math.round((x - BLOCK_SIZE/2) / BLOCK_SIZE + SX/2);
+  const gz = Math.round((z - BLOCK_SIZE/2) / BLOCK_SIZE + SZ/2);
+
+  // find surface grid y for the tile under the rock
+  const sy = getSurfaceY(gx, gz);
+
+  // place rock: if we found a surface, snap to it; otherwise use passed y as fallback
+  if (sy !== null) {
+    const worldY = (sy + 1) * BLOCK_SIZE;
+    rock.position.set(x, worldY + 0.02, z); // tiny clearance so it sits on top
+    rock.userData.gy = sy;
+  } else {
+    // fallback placement (rare): use provided y but nudge up a bit
+    rock.position.set(x, y + 0.25*scale + 0.02, z);
+    rock.userData.gy = null;
+  }
+
+  rock.userData.gx = gx;
+  rock.userData.gz = gz;
+  rock.userData.scale = scale;
+  rock.userData.velY = 0;      // vertical velocity (for falling)
+  rock.userData.falling = false;
+
+  // keep it grouped visually with other decor (same as before)
   decorGroup.add(rock);
+
+  // track it so we can animate / remove it
+  rocks.push(rock);
 }
+
 
 /* TORCH LIGHTS */
 const torches = []; // { light, gridIndex }
@@ -454,9 +487,13 @@ function removeTorchAtGridIndex(gidx){
 }
 
 /* ================================================================
-   ANIMAL NPCs: Cute Hopping Bunnies
+   ANIMAL NPCs: Cute Hopping Bunnies Etc Etc
    ================================================================ */
 const bunnies = [];
+const foxes = [];
+const rocks = [];
+
+
 const BUNNY_COUNT = 8; // Change this for more/fewer bunnies
 const BUNNY_RADIUS = 0.18;
 const BUNNY_HEIGHT = 0.38;
@@ -578,12 +615,273 @@ function spawnBunnies() {
   }
 }
 
+/* ================================================================
+   FOX NPCs: one fox per island (only spawn on islands without bunnies)
+   Inserted: makeFoxMesh(), animateFox(), spawnFoxes()
+   ================================================================ */
+
+function makeFoxMesh() {
+  // (exact fox mesh builder from your demo)
+  const group = new THREE.Group();
+  const orange = 0xf88c1c, white = 0xffffff, black = 0x2e2e2e, pink = 0xffaac8, darkOrange = 0xa85607;
+
+  // BODY
+  const body = new THREE.Mesh(
+    new THREE.BoxGeometry(0.24, 0.18, 0.60),
+    new THREE.MeshStandardMaterial({ color: orange })
+  );
+  body.position.set(0, 0.13, 0);
+  group.add(body);
+
+  // HEAD (group for nod)
+  const headGroup = new THREE.Group(); headGroup.position.set(0, 0.32, 0.20); group.add(headGroup);
+  const headBox = new THREE.Mesh(new THREE.BoxGeometry(0.21, 0.16, 0.16), new THREE.MeshStandardMaterial({ color: orange }));
+  headBox.position.set(0,0,0); headGroup.add(headBox);
+  const headSphere = new THREE.Mesh(new THREE.SphereGeometry(0.09, 18, 12), new THREE.MeshStandardMaterial({ color: orange }));
+  headSphere.position.set(0, 0.014, 0.02); headGroup.add(headSphere);
+
+  // SNOUT + TIP + NOSE
+  const snout = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.07, 0.13), new THREE.MeshStandardMaterial({ color: orange }));
+  snout.position.set(0, -0.025, 0.12); headGroup.add(snout);
+  const snoutTip = new THREE.Mesh(new THREE.BoxGeometry(0.07, 0.06, 0.045), new THREE.MeshStandardMaterial({ color: white }));
+  snoutTip.position.set(0, -0.025, 0.175); headGroup.add(snoutTip);
+  const nose = new THREE.Mesh(new THREE.SphereGeometry(0.015, 8, 5), new THREE.MeshStandardMaterial({ color: black, metalness: 0.2 }));
+  nose.position.set(0, -0.025, 0.21); headGroup.add(nose);
+
+  // Ears (groups)
+  const leftEarGroup = new THREE.Group(); leftEarGroup.position.set(-0.08, 0.12, 0.01); headGroup.add(leftEarGroup);
+  const rightEarGroup = new THREE.Group(); rightEarGroup.position.set(0.08, 0.12, 0.01); headGroup.add(rightEarGroup);
+  const leftEar = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.14, 0.03), new THREE.MeshStandardMaterial({ color: orange }));
+  leftEar.position.set(0,0,0); leftEarGroup.add(leftEar);
+  const rightEar = leftEar.clone(); rightEarGroup.add(rightEar);
+
+  group.userData.leftEarGroup = leftEarGroup;
+  group.userData.rightEarGroup = rightEarGroup;
+  group.userData.headGroup = headGroup;
+
+  // Eyes, brows, blush
+  for (let i = -1; i <= 1; i += 2) {
+    const eye = new THREE.Mesh(new THREE.SphereGeometry(0.014, 8, 6), new THREE.MeshStandardMaterial({ color: 0x2e2e2e }));
+    eye.position.set(0.045 * i, -0.01, 0.13); headGroup.add(eye);
+    const brow = new THREE.Mesh(new THREE.BoxGeometry(0.034, 0.008, 0.008), new THREE.MeshStandardMaterial({ color: darkOrange }));
+    brow.position.set(0.045 * i, 0.016, 0.13); brow.rotation.z = i * Math.PI/8; headGroup.add(brow);
+    const blush = new THREE.Mesh(new THREE.SphereGeometry(0.012, 6, 4), new THREE.MeshStandardMaterial({ color: pink }));
+    blush.position.set(0.06 * i, -0.03, 0.09); headGroup.add(blush);
+  }
+
+  // MOUTH
+  const mouth = new THREE.Mesh(new THREE.BoxGeometry(0.022, 0.007, 0.012), new THREE.MeshStandardMaterial({ color: darkOrange }));
+  mouth.position.set(0, -0.032, 0.17); headGroup.add(mouth);
+
+  // TAIL group for wag
+  const tailGroup = new THREE.Group(); tailGroup.position.set(0, 0.10, -0.38); group.add(tailGroup);
+  const tail = new THREE.Mesh(new THREE.BoxGeometry(0.10, 0.10, 0.40), new THREE.MeshStandardMaterial({ color: orange }));
+  tail.position.set(0,0,0); tailGroup.add(tail);
+  const tailTip = new THREE.Mesh(new THREE.BoxGeometry(0.13, 0.13, 0.13), new THREE.MeshStandardMaterial({ color: white }));
+  tailTip.position.set(0,0,-0.18); tailGroup.add(tailTip);
+  group.userData.tailGroup = tailGroup;
+
+  // Legs (groups stored in userData.legs)
+  group.userData.legs = [];
+  for (let i = -1; i <= 1; i += 2) {
+    const hindLegGroup = new THREE.Group(); hindLegGroup.position.set(0.075 * i, 0.05, -0.10); group.add(hindLegGroup);
+    const hindLeg = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.13, 0.06), new THREE.MeshStandardMaterial({ color: orange }));
+    hindLeg.position.set(0,0,0); hindLegGroup.add(hindLeg);
+    const hindPaw = new THREE.Mesh(new THREE.SphereGeometry(0.025, 7, 6), new THREE.MeshStandardMaterial({ color: 0x2e2e2e }));
+    hindPaw.position.set(0, -0.064, 0); hindLegGroup.add(hindPaw);
+
+    const foreLegGroup = new THREE.Group(); foreLegGroup.position.set(0.042 * i, 0.04, 0.15); group.add(foreLegGroup);
+    const foreLeg = new THREE.Mesh(new THREE.BoxGeometry(0.035, 0.13, 0.05), new THREE.MeshStandardMaterial({ color: orange }));
+    foreLeg.position.set(0,0,0); foreLegGroup.add(foreLeg);
+    const forePaw = new THREE.Mesh(new THREE.SphereGeometry(0.018, 6, 5), new THREE.MeshStandardMaterial({ color: 0x2e2e2e }));
+    forePaw.position.set(0, -0.064, 0); foreLegGroup.add(forePaw);
+
+    group.userData.legs.push({leg: hindLegGroup, isFore: false, side: i});
+    group.userData.legs.push({leg: foreLegGroup, isFore: true, side: i});
+  }
+
+  // Chest fluff
+  for (let i = 0; i < 3; ++i) {
+    const fluff = new THREE.Mesh(new THREE.SphereGeometry(0.035 + i*0.012, 8, 6), new THREE.MeshStandardMaterial({ color: white }));
+    fluff.position.set(0, 0.16 + i*0.015, 0.19 + i*0.025);
+    group.add(fluff);
+  }
+
+  group.scale.set(1.1, 1.1, 1.1);
+  return group;
+}
+
+// --- FOX: ground-snapping walker (replace old animateFox) ---
+// ------------ new animateFox: ground-aware wandering + death-on-no-surface ------------
+function animateFox(fox, dt) {
+  // safety: skip if already removed
+  if (!fox.parent) return;
+
+  // If fox has no AI state (older spawns), initialize safe defaults
+  if (!fox.userData.pos) {
+    fox.userData.pos = { x: fox.position.x, z: fox.position.z };
+    fox.userData.dir = Math.random() * Math.PI * 2;
+    fox.userData.wanderTimer = 1.0;
+    fox.userData.speed = 0.6;
+    fox.userData.baseY = fox.position.y;
+  }
+
+  // Convert fox world x,z to grid to find surface under it
+  const gx = Math.round((fox.userData.pos.x + SX/2*BLOCK_SIZE - BLOCK_SIZE/2) / BLOCK_SIZE);
+  const gz = Math.round((fox.userData.pos.z + SZ/2*BLOCK_SIZE - BLOCK_SIZE/2) / BLOCK_SIZE);
+  const surfaceY = getSurfaceY(gx, gz);
+
+  // No surface -> island gone: remove the fox (dies)
+  if (surfaceY === null) {
+    try { scene.remove(fox); } catch(e) {}
+    const fi = foxes.indexOf(fox);
+    if (fi >= 0) foxes.splice(fi, 1);
+    // optional: spawn a little particle or sound here if you want
+    return;
+  }
+
+  // Update stored ground height
+  fox.userData.baseY = (surfaceY + 1) * BLOCK_SIZE;
+
+  // Wander logic (very similar to bunny idea but walking, no hop)
+  fox.userData.wanderTimer -= dt;
+  if (fox.userData.wanderTimer <= 0) {
+    fox.userData.dir += (Math.random() - 0.5) * 0.8; // gentle turn
+    fox.userData.wanderTimer = 1.0 + Math.random() * 3.0;
+  }
+
+  // Try to move forward
+  const moveDist = fox.userData.speed * dt;
+  const tryX = fox.userData.pos.x + Math.cos(fox.userData.dir) * moveDist;
+  const tryZ = fox.userData.pos.z + Math.sin(fox.userData.dir) * moveDist;
+
+  const tgtGX = Math.round((tryX + SX/2*BLOCK_SIZE - BLOCK_SIZE/2) / BLOCK_SIZE);
+  const tgtGZ = Math.round((tryZ + SZ/2*BLOCK_SIZE - BLOCK_SIZE/2) / BLOCK_SIZE);
+  const tgtSurfaceY = getSurfaceY(tgtGX, tgtGZ);
+
+  // Only move if target has a surface and step is small and space above is free
+  if (
+    tgtSurfaceY !== null &&
+    Math.abs(tgtSurfaceY - surfaceY) <= 1 &&
+    blocks[idx(tgtGX, tgtSurfaceY + 1, tgtGZ)] === BT.NONE &&
+    blocks[idx(tgtGX, tgtSurfaceY + 2, tgtGZ)] === BT.NONE
+  ) {
+    fox.userData.pos.x = tryX;
+    fox.userData.pos.z = tryZ;
+  } else {
+    // blocked -> turn away
+    fox.userData.dir += Math.PI * 0.5 + (Math.random() - 0.5) * 0.8;
+    fox.userData.wanderTimer = 0.6 + Math.random() * 1.5;
+  }
+
+  // Apply position and ground snap
+  fox.position.x = fox.userData.pos.x;
+  fox.position.z = fox.userData.pos.z;
+  fox.position.y = fox.userData.baseY + 0.02; // small foot clearance
+
+  // Face walking direction
+  fox.rotation.y = -fox.userData.dir + Math.PI / 2;
+
+  // Simple periodic animations (reuse spawnTimeOffset so each fox is slightly out of phase)
+  const t = performance.now() * 0.001 + (fox.userData.spawnTimeOffset || 0);
+
+  // tail/head/ears animation
+  if (fox.userData.tailGroup) {
+    fox.userData.tailGroup.rotation.y = Math.sin(t * 2.7) * 0.32;
+    fox.userData.tailGroup.rotation.x = Math.PI / 10 + Math.sin(t * 1.8) * 0.08;
+  }
+  if (fox.userData.headGroup) {
+    fox.userData.headGroup.rotation.x = Math.sin(t * 1.5) * 0.06; // smaller nod for walking
+  }
+  if (fox.userData.leftEarGroup) {
+    fox.userData.leftEarGroup.rotation.z = Math.sin(t * 2.4) * 0.12 - 0.06;
+  }
+  if (fox.userData.rightEarGroup) {
+    fox.userData.rightEarGroup.rotation.z = -Math.sin(t * 2.8) * 0.10 + 0.06;
+  }
+
+  // Legs: walk animation (smaller amplitude than original demo)
+  if (fox.userData.legs) {
+    for (let i = 0; i < fox.userData.legs.length; ++i) {
+      const legObj = fox.userData.legs[i];
+      // keep fore and hind opposite for a simple gait
+      const phase = (legObj.isFore ? 0 : Math.PI) + (legObj.side > 0 ? 0 : Math.PI);
+      legObj.leg.rotation.x = Math.sin(t * 6 + phase) * 0.5;
+    }
+  }
+}
+
+
+
+// spawnFoxes: one per islandSpec, only if no bunny is inside island radius
+function spawnFoxes() {
+  // remove any existing foxes
+  for (const f of foxes) { if (f.parent) f.parent.remove(f); }
+  foxes.length = 0;
+
+  for (let si = 0; si < islandSpecs.length; si++) {
+    const sp = islandSpecs[si];
+    const centerGX = Math.floor(SX/2) + Math.round(sp.cx);
+    const centerGZ = Math.floor(SZ/2) + Math.round(sp.cz);
+    const centerWX = (centerGX - SX/2) * BLOCK_SIZE + BLOCK_SIZE/2;
+    const centerWZ = (centerGZ - SZ/2) * BLOCK_SIZE + BLOCK_SIZE/2;
+    const radWorld = (sp.radius || 4.0) * BLOCK_SIZE;
+
+    // skip island if any bunny is inside island radius
+    const hasBunnyHere = bunnies.some(b => {
+      const dx = b.pos.x - centerWX, dz = b.pos.z - centerWZ;
+      return Math.sqrt(dx*dx + dz*dz) <= radWorld;
+    });
+    if (hasBunnyHere) continue;
+
+    // find surface Y at center (or nearby). Try center tile first.
+    let gy = getSurfaceY(centerGX, centerGZ);
+    if (gy === null) {
+      // scan small area for a surface
+      const scanR = Math.max(1, Math.ceil(sp.radius));
+      outer: for (let dx = -scanR; dx <= scanR; dx++) {
+        for (let dz = -scanR; dz <= scanR; dz++) {
+          gy = getSurfaceY(centerGX + dx, centerGZ + dz);
+          if (gy !== null) break outer;
+        }
+      }
+    }
+    if (gy === null) continue; // can't place
+
+    // pick a small random offset inside the island radius
+    const a = Math.random() * Math.PI * 2;
+    const r = Math.sqrt(Math.random()) * (radWorld * 0.5);
+    const ox = Math.cos(a) * r;
+    const oz = Math.sin(a) * r;
+
+    const worldX = centerWX + ox;
+    const worldZ = centerWZ + oz;
+    const worldY = (gy + 1) * BLOCK_SIZE;
+
+    const fox = makeFoxMesh();
+    fox.userData.home = new THREE.Vector3(worldX, worldY, worldZ);
+    fox.position.copy(fox.userData.home);
+    fox.userData.spawnTimeOffset = Math.random() * 5.0;
+// --- FOX: initialize wandering AI state (do NOT remove the previous spawnTimeOffset line) ---
+fox.userData.pos = { x: fox.position.x, z: fox.position.z }; // x,z pos used by walker
+fox.userData.dir = Math.random() * Math.PI * 2;              // facing direction (radians)
+fox.userData.wanderTimer = 0.5 + Math.random() * 2.0;        // time until next direction change
+fox.userData.speed = 0.6 + Math.random() * 0.2;              // units/sec (walk speed)
+fox.userData.baseY = fox.position.y;                         // y of the ground under it
+
+    scene.add(fox);
+    foxes.push(fox);
+  }
+}
+
 // Patch worldgen to also respawn bunnies
 const _oldGenerateIslandsOnly = generateIslandsOnly;
 generateIslandsOnly = function() {
   _oldGenerateIslandsOnly();
   spawnBunnies();
+  spawnFoxes(); // spawn foxes only on islands that had no bunnies
 };
+
 
 /* ================================================================
    TNT: ignite / explode
@@ -1192,7 +1490,74 @@ if (typeof axe !== 'undefined') {
 
   // Face direction, add a little wiggle for cuteness
   b.mesh.rotation.y = -b.dir + Math.PI/2 + Math.sin(performance.now()/470 + i)*0.1;
+} // === Fox NPCs: animate ===
+// === Fox NPCs: animate (iterate backwards so removal while iterating is safe) ===
+for (let i = foxes.length - 1; i >= 0; i--) {
+  const f = foxes[i];
+  animateFox(f, dt);
 }
+
+// === Rocks: gravity, fall-through, and removal ===
+const GRAVITY = -22.0; // tune this if you want slower/faster falling
+
+for (let i = rocks.length - 1; i >= 0; i--) {
+  const r = rocks[i];
+
+  // if rock was removed already, skip
+  if (!r.parent) { rocks.splice(i,1); continue; }
+
+  // compute grid cell under current rock X,Z
+  const gx = Math.round((r.position.x - BLOCK_SIZE/2) / BLOCK_SIZE + SX/2);
+  const gz = Math.round((r.position.z - BLOCK_SIZE/2) / BLOCK_SIZE + SZ/2);
+  const surfaceY = getSurfaceY(gx, gz); // grid y or null
+
+  // if there is a surface here, compute its world Y
+  const hasSurface = surfaceY !== null;
+  const targetWorldY = hasSurface ? (surfaceY + 1) * BLOCK_SIZE + 0.02 : null;
+
+  // If there is no surface under the rock, start falling (or continue falling)
+  if (!hasSurface) {
+    // start falling if not already
+    if (!r.userData.falling) {
+      r.userData.falling = true;
+      r.userData.velY = 0;
+    }
+  } else {
+    // There is a surface. If the surface dropped below the rock (support removed), start falling.
+    if (!r.userData.falling && r.position.y > targetWorldY + 0.05) {
+      r.userData.falling = true;
+      r.userData.velY = 0;
+    }
+  }
+
+  // Integrate falling if needed
+  if (r.userData.falling) {
+    // dt is in scope in animate()
+    r.userData.velY += GRAVITY * dt;
+    r.position.y += r.userData.velY * dt;
+
+    // If we've hit a new surface, snap to it and stop falling
+    if (hasSurface && r.position.y <= targetWorldY) {
+      r.position.y = targetWorldY;
+      r.userData.velY = 0;
+      r.userData.falling = false;
+    }
+
+    // If rock falls far below world bounds, remove it
+    if (r.position.y < -BLOCK_SIZE * 20) {
+      try { decorGroup.remove(r); } catch(e) {}
+      try { if (r.parent) r.parent.remove(r); } catch(e) {}
+      rocks.splice(i, 1);
+      continue;
+    }
+  } else {
+    // keep rock sitting on the surface neatly
+    if (hasSurface) r.position.y = targetWorldY;
+  }
+}
+
+
+
 
   // render
   renderer.render(scene, camera);
