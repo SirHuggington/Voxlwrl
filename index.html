@@ -24,6 +24,8 @@
   .slot span{font-size:12px;opacity:0.9}
   #miniInv{position:absolute;left:12px;bottom:12px;z-index:6;background:rgba(0,0,0,0.28);padding:6px;border-radius:6px;font-size:13px}
   #placedBadge {display:inline-block;margin-left:10px;color:#b6f59a;font-weight:600}
+  #miniInv { display: none !important; }
+
 </style>
 </head>
 <body>
@@ -31,9 +33,9 @@
   <div id="canvasWrap">
     <canvas id="c"></canvas>
     <div id="ui">
-      <div id="controls">WASD move • Space jump • Click to lock mouse • Hold left-click to mine • Right click = place selected</div>
+      <div id="controls">8 = Rescue (aim & be within 2 meters) • 9 = Release</div>
       <button id="regen">Regenerate</button>
-      <div id="objective">Objective: Place 25 blocks to activate the beacon</div>
+      <div id="objective">Rescue all the Animals and bring them to the Marine</div>
       <div id="hint">Placed: <span id="placedCount">0</span> • Blocks: <span id="count">0</span> • Time: <span id="time">12:00</span></div>
     </div>
     <div id="miniInv"></div>
@@ -425,13 +427,62 @@ function spawnBreakParticlesFromGridIndex(gidx){
    DECOR: Trees & Rocks (procedural meshes)
    ================================================================ */
 const decorGroup = new THREE.Group(); scene.add(decorGroup);
-function spawnTreeAt(x,y,z, scale=1.0){
-  const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.18*scale,0.22*scale,1*scale,8), new THREE.MeshStandardMaterial({ map: woodTex }));
-  trunk.position.set(x, y+0.5*scale, z);
-  const leaves = new THREE.Mesh(new THREE.SphereGeometry(0.9*scale,8,8), new THREE.MeshStandardMaterial({ map: leafTex }));
-  leaves.position.set(x, y+1.25*scale, z);
-  decorGroup.add(trunk); decorGroup.add(leaves);
+// spawnTreeAt: places a tree group and makes it physical (can fall)
+function spawnTreeAt(x, y, z, scale = 1) {
+  // create a group for trunk + crown so it falls as one object
+  const tree = new THREE.Group();
+
+  // trunk
+  const trunkHeight = 1.0 * scale;
+  const trunk = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.12 * scale, 0.16 * scale, trunkHeight, 8),
+    new THREE.MeshStandardMaterial({ color: 0x6b3f24 })
+  );
+  trunk.position.set(0, trunkHeight/2, 0);
+  tree.add(trunk);
+
+  // crown (simple sphere of leaves)
+  const crown = new THREE.Mesh(
+    new THREE.SphereGeometry(0.6 * scale, 8, 8),
+    new THREE.MeshStandardMaterial({ color: 0x2f8a2f })
+  );
+  crown.position.set(0, trunkHeight + 0.25 * scale, 0);
+  tree.add(crown);
+
+  // compute grid coords under world x,z (same formula used for rocks)
+  const gx = Math.round((x - BLOCK_SIZE/2) / BLOCK_SIZE + SX/2);
+  const gz = Math.round((z - BLOCK_SIZE/2) / BLOCK_SIZE + SZ/2);
+
+  const sy = getSurfaceY(gx, gz);
+
+  if (sy !== null) {
+    const worldY = (sy + 1) * BLOCK_SIZE;
+    tree.position.set(x, worldY + 0.02, z);
+    tree.userData.gy = sy;
+  } else {
+    // fallback
+    tree.position.set(x, y + 0.25 * scale + 0.02, z);
+    tree.userData.gy = null;
+  }
+
+  tree.userData.gx = gx;
+  tree.userData.gz = gz;
+  tree.userData.scale = scale;
+
+  // physics-like state for falling
+  tree.userData.falling = false;
+  tree.userData.velY = 0;
+
+  // give a tiny mass effect (affects falling speed if you want to tune)
+  tree.userData.mass = 1.6 * scale;
+
+  // same visual grouping as other decor (use your decorGroup)
+  decorGroup.add(tree);
+
+  // track for per-frame update
+  trees.push(tree);
 }
+
 function spawnRockAt(x,y,z, scale=1){
   // create mesh (same look as before)
   const rock = new THREE.Mesh(
@@ -492,6 +543,205 @@ function removeTorchAtGridIndex(gidx){
 const bunnies = [];
 const foxes = [];
 const rocks = [];
+const trees = [];
+const marines = [];
+
+// --- makeMarineMesh() -> returns a THREE.Group with simple parts and red eye slits ---
+function makeMarineMesh() {
+  const group = new THREE.Group();
+
+  // materials (local)
+  const bulkMat = new THREE.MeshPhongMaterial({ color: 0x6666ff, flatShading: true });
+  const armorMat = new THREE.MeshPhongMaterial({ color: 0x333388, shininess: 50 });
+  const weaponMat = new THREE.MeshPhongMaterial({ color: 0x222222 });
+  const redEyeMat = new THREE.MeshPhongMaterial({ color: 0xff0000, emissive: 0xff0000, emissiveIntensity: 1 });
+
+  // torso
+  const chest = new THREE.Mesh(new THREE.BoxGeometry(3.5, 2.2, 1.6), armorMat);
+  chest.position.y = 1.2; group.add(chest);
+
+  // shoulder pads
+  function shoulder(x){
+    const pad = new THREE.Mesh(new THREE.SphereGeometry(1.4, 12, 8), armorMat);
+    pad.scale.y = 1.3; pad.position.set(x, 2.2, 0); return pad;
+  }
+  group.add(shoulder(-2.8));
+  group.add(shoulder(2.8));
+
+  // head + eyes
+  const headGroup = new THREE.Group();
+  headGroup.position.y = 2.5;
+  group.add(headGroup);
+  const helmet = new THREE.Mesh(new THREE.SphereGeometry(1.0, 12, 8), bulkMat);
+  headGroup.add(helmet);
+  const snout = new THREE.Mesh(new THREE.CylinderGeometry(0.25,0.25,0.8,12), weaponMat);
+  snout.rotation.x = Math.PI/2; snout.position.set(0, -0.2, 1.0); headGroup.add(snout);
+
+  // eye slits (store refs for flicker)
+  group.userData.redSlits = [];
+  function addEye(x){
+    const slit = new THREE.Mesh(new THREE.BoxGeometry(0.2,0.05,0.21), redEyeMat);
+    slit.position.set(x, 0, 0.96);
+    headGroup.add(slit);
+    group.userData.redSlits.push(slit);
+  }
+  addEye(-0.4); addEye(0.4);
+
+  // simple arms and bolter (visual only)
+  const armL = new THREE.Mesh(new THREE.CylinderGeometry(0.6,0.6,3,10), armorMat);
+  const armR = armL.clone();
+  armL.position.set(-3.2, 0.5, 0); armL.rotation.z = Math.PI/6; group.add(armL);
+  armR.position.set(3.2, 0.5, 0); armR.rotation.z = -Math.PI/6; group.add(armR);
+
+  // legs
+  const legL = new THREE.Group(); legL.position.set(-0.9, -2.5, 0);
+  legL.add(new THREE.Mesh(new THREE.CylinderGeometry(0.9,1.0,3,10), armorMat));
+  group.add(legL);
+  const legR = legL.clone(); legR.position.x = 0.9; group.add(legR);
+  group.userData.legL = legL; group.userData.legR = legR;
+
+  group.scale.set(0.55, 0.55, 0.55);
+
+  return group;
+}
+
+// --- spawn one marine on starting island (index 0) ---
+function spawnMarineOnStartIsland() {
+  // remove existing
+  for (let m of marines) if (m.parent) m.parent.remove(m);
+  marines.length = 0;
+
+  if (!islandSpecs || islandSpecs.length === 0) return;
+  const sp = islandSpecs[0]; // starting island spec
+  const centerGX = Math.floor(SX/2) + Math.round(sp.cx);
+  const centerGZ = Math.floor(SZ/2) + Math.round(sp.cz);
+  let gy = getSurfaceY(centerGX, centerGZ);
+  if (gy === null) { // scan small area
+    const scanR = Math.max(1, Math.ceil(sp.radius));
+    outer: for (let dx=-scanR; dx<=scanR; dx++){
+      for (let dz=-scanR; dz<=scanR; dz++){
+        gy = getSurfaceY(centerGX+dx, centerGZ+dz);
+        if (gy !== null) break outer;
+      }
+    }
+  }
+  if (gy === null) return;
+  const wx = (centerGX - SX/2) * BLOCK_SIZE + BLOCK_SIZE/2;
+  const wz = (centerGZ - SZ/2) * BLOCK_SIZE + BLOCK_SIZE/2;
+  const wy = (gy + 1) * BLOCK_SIZE;
+
+  const marine = makeMarineMesh();
+  marine.position.set(wx, wy, wz);
+  marine.userData.home = new THREE.Vector3(wx, wy, wz);
+  marine.userData.dir = Math.random()*Math.PI*2;
+  marine.userData.speed = 1.0; // walking speed
+  marine.userData.walkRadius = Math.max(1.0, (sp.radius || 4) * BLOCK_SIZE * 0.45);
+  marine.userData.spawnTimeOffset = Math.random()*5;
+  marine.userData.pos = { x: wx, z: wz }; marine.userData.wanderTimer = 1.0 + Math.random()*2.0;
+
+    // add to scene, then snap lowest mesh point to the surface so feet don't clip
+
+  scene.add(marine);
+
+  // compute bounding box in world space and lift so bbox.min.y == surface wy + 0.02
+const bbox1 = new THREE.Box3().setFromObject(marine);
+const minY1 = bbox1.min.y;
+const desiredMinY = wy + 0.02; // top-of-block + small clearance at feet
+marine.position.y += (desiredMinY - minY1);
+
+// compute and store the fixed "foot offset" = distance from origin to the lowest point
+const bbox2 = new THREE.Box3().setFromObject(marine); // recompute after lifting
+marine.userData.footOffset = marine.position.y - bbox2.min.y; // should equal origin->feet distance
+
+// store baseY used by AI/walking (includes foot offset so feet stay at desiredMinY)
+marine.userData.baseY = desiredMinY + marine.userData.footOffset;
+
+
+  marines.push(marine);
+
+}
+
+// --- animateMarine: patrol + ground snap + removal when island gone ---
+function animateMarine(marine, dt) {
+  if (!marine.parent) return;
+
+  // ensure AI state
+  if (!marine.userData.pos) {
+    marine.userData.pos = { x: marine.position.x, z: marine.position.z };
+    marine.userData.dir = Math.random() * Math.PI * 2;
+    marine.userData.wanderTimer = 1.0 + Math.random()*2.0;
+    marine.userData.speed = marine.userData.speed || 1.0;
+  }
+
+  // check ground under current pos; remove if island gone
+  const gx = Math.round((marine.position.x - BLOCK_SIZE/2) / BLOCK_SIZE + SX/2);
+  const gz = Math.round((marine.position.z - BLOCK_SIZE/2) / BLOCK_SIZE + SZ/2);
+  const surfaceY = getSurfaceY(gx, gz);
+  if (surfaceY === null) {
+    try { scene.remove(marine); } catch(e) {}
+    const mi = marines.indexOf(marine); if (mi >= 0) marines.splice(mi,1);
+    return;
+  }
+  
+
+
+  // wandering AI: change direction occasionally
+  marine.userData.wanderTimer -= dt;
+  if (marine.userData.wanderTimer <= 0) {
+    marine.userData.dir += (Math.random() - 0.5) * 1.2; // small random turn
+    marine.userData.wanderTimer = 0.8 + Math.random() * 2.0;
+  }
+
+  // attempt move
+  const moveDist = (marine.userData.speed || 1.0) * dt;
+  const tryX = marine.userData.pos.x + Math.cos(marine.userData.dir) * moveDist;
+  const tryZ = marine.userData.pos.z + Math.sin(marine.userData.dir) * moveDist;
+
+  const tgtGX = Math.round((tryX - BLOCK_SIZE/2) / BLOCK_SIZE + SX/2);
+  const tgtGZ = Math.round((tryZ - BLOCK_SIZE/2) / BLOCK_SIZE + SZ/2);
+  const tgtSY = getSurfaceY(tgtGX, tgtGZ);
+
+  if (tgtSY !== null &&
+      Math.abs(tgtSY - surfaceY) <= 1 &&
+      blocks[idx(tgtGX, tgtSY + 1, tgtGZ)] === BT.NONE &&
+      blocks[idx(tgtGX, tgtSY + 2, tgtGZ)] === BT.NONE) {
+    // move allowed
+    marine.userData.pos.x = tryX;
+    marine.userData.pos.z = tryZ;
+  } else {
+    // blocked -> turn away
+    marine.userData.dir += Math.PI * 0.6 + (Math.random() - 0.5) * 0.8;
+    marine.userData.wanderTimer = 0.5 + Math.random() * 1.5;
+  }
+
+  // apply position + snap to ground
+  marine.position.x = marine.userData.pos.x;
+  marine.position.z = marine.userData.pos.z;
+  const desiredMinY = (surfaceY + 1) * BLOCK_SIZE + 0.02; // keep feet just above block top
+marine.userData.baseY = desiredMinY + (marine.userData.footOffset || 0);
+marine.position.y = marine.userData.baseY;
+
+
+  // face movement
+  marine.rotation.y = -marine.userData.dir + Math.PI/2;
+
+  // simple leg animation
+  const t = performance.now()*0.001 + (marine.userData.spawnTimeOffset || 0);
+  if (marine.userData.legL) {
+    marine.userData.legL.rotation.x = Math.sin(t*6)*0.35;
+    marine.userData.legR.rotation.x = Math.sin(t*6 + Math.PI)*0.35;
+  }
+
+  // flicker red eyes
+  if (marine.userData.redSlits) {
+    const pulse = 0.5 + 0.5*Math.sin(t*2);
+    const flick = (Math.random()*0.2 - 0.1);
+    marine.userData.redSlits.forEach(s => s.material.emissiveIntensity = THREE.MathUtils.clamp(pulse + flick, 0, 1));
+  }
+}
+
+
+
 
 
 const BUNNY_COUNT = 8; // Change this for more/fewer bunnies
@@ -879,8 +1129,10 @@ const _oldGenerateIslandsOnly = generateIslandsOnly;
 generateIslandsOnly = function() {
   _oldGenerateIslandsOnly();
   spawnBunnies();
-  spawnFoxes(); // spawn foxes only on islands that had no bunnies
+  spawnFoxes();
+  spawnMarineOnStartIsland();
 };
+
 
 
 /* ================================================================
@@ -1138,11 +1390,31 @@ function generateIslandsOnly() {
    ================================================================ */
 const player = { pos: RESPAWN_POS.clone(), vel: new THREE.Vector3(), yaw:0, pitch:0, speed:5, radius:0.28, height:1.75, onGround:false };
 const keys = {};
+// --- INPUT / KEYBINDINGS (replace old keydown handler with this block) ---
 window.addEventListener('keydown', e => {
+  // keep lower-case state for movement checks
   keys[e.key.toLowerCase()] = true;
+
+  // jump
   if (e.key === ' ' && player.onGround) player.vel.y = 6;
-  if (e.key >= '1' && e.key <= '7') selectHotbar(parseInt(e.key, 10) - 1);
+
+  // block hotbar selection (1..7 remains)
+  if (e.key >= '1' && e.key <= '7') {
+    selectHotbar(parseInt(e.key, 10) - 1);
+    return;
+  }
+
+  // Rescue (key 8) and Release (key 9)
+  if (e.key === '8') {
+    attemptRescue();
+    return;
+  }
+  if (e.key === '9') {
+    attemptRelease();
+    return;
+  }
 });
+
 
 window.addEventListener('keyup', e => { keys[e.key.toLowerCase()] = false; });
 
@@ -1298,9 +1570,283 @@ function buildHotbar(){ hotbarEl.innerHTML=''; for (let i=0;i<HOTBAR_SLOTS.lengt
 function updateHotbarCounts(){ for (let i=0;i<HOTBAR_SLOTS.length;i++){ const span = document.getElementById('inv'+i); if (span) span.textContent = inventory[HOTBAR_SLOTS[i]]>0?inventory[HOTBAR_SLOTS[i]]:''; const el = hotbarEl.children[i]; el.className = 'slot' + (i===hotbarSel?' sel':''); } miniInvEl.innerHTML = `Selected: <b>${BLOCK_NAMES[selectedBlockType]}</b> (keys 1-7) / Inventory: Grass ${inventory[BT.GRASS]} Dirt ${inventory[BT.DIRT]} Stone ${inventory[BT.STONE]} Wood ${inventory[BT.WOOD]} Leaves ${inventory[BT.LEAVES]} Torches ${inventory[BT.TORCH]} TNT ${inventory[BT.TNT]}`; }
 function selectHotbar(i){ hotbarSel = i; selectedBlockType = HOTBAR_SLOTS[i]; buildHotbar(); }
 
-/* ================================================================
-   ANIMATE LOOP
-   ================================================================ */
+/* ===========================
+   RESCUE / RELEASE: inventory + UI
+   Insert this after selectHotbar(...)
+   =========================== */
+
+// animals / rescue state
+let totalAnimals = 0;
+let deliveredAnimals = 0;    // animals delivered to Marine (the "saved" counter)
+let heldAnimals = [];        // array of { type: 'bunny' | 'fox' } for animals the player is carrying
+
+// update the on-screen objective + small held counters
+function updateObjectiveUI(){
+  // objective header
+  const objEl = document.getElementById('objective');
+  if (objEl) {
+    objEl.textContent = `Rescue all the Animals and bring them to the Marine — Saved: ${deliveredAnimals}/${Math.max(1,totalAnimals)}`;
+  }
+  // mini inventory (explicit and simple)
+  const mini = document.getElementById('miniInv');
+  if (mini) {
+    mini.innerHTML = `Holding: <b>${heldAnimals.length}</b> • Saved: <b>${deliveredAnimals}</b>/<b>${totalAnimals}</b>`;
+  }
+}
+
+// count total animals currently placed on the map (run after spawn)
+function countTotalAnimals(){
+  totalAnimals = (bunnies ? bunnies.length : 0) + (foxes ? foxes.length : 0);
+  updateObjectiveUI();
+}
+
+// helper: find animal (bunny/fox) from an intersected THREE.Object3D
+function findAnimalFromObject(obj){
+  while(obj){
+    // check bunnies (bunnies store .mesh)
+    for (let i=0;i<bunnies.length;i++){
+      if (bunnies[i].mesh === obj) return { kind: 'bunny', index: i };
+    }
+    // check foxes (foxes store meshes directly)
+    for (let i=0;i<foxes.length;i++){
+      if (foxes[i] === obj) return { kind: 'fox', index: i };
+    }
+    obj = obj.parent;
+  }
+  return null;
+}
+
+// visual crosshair color update: green when aiming at an animal within 1m
+function updateCrosshairForAnimal(isGood){
+  const cross = document.getElementById('cross');
+  if (!cross) return;
+  // toggle a small inline style so it inherits existing css
+  cross.style.setProperty('--cross-color', isGood ? '#7fffa1' : 'white');
+  // we change the small dot color by directly updating the :after background via style
+  cross.style.setProperty('color', isGood ? '#7fffa1' : 'white');
+  // simpler: change the inner dot (we target the after pseudo via a small trick: set background on the element)
+  cross.style.background = 'transparent';
+  // set the actual small dot by creating a child if needed (safe fallback)
+  if (!cross._dotCreated) {
+    cross._dotCreated = true;
+    cross.querySelector('div')?.remove?.(); // no-op if none
+    // create a tiny visible dot element inside #cross so we can color it easily
+    const dot = document.createElement('div');
+    dot.style.position = 'absolute';
+    dot.style.left = '50%';
+    dot.style.top = '50%';
+    dot.style.width = '4px';
+    dot.style.height = '4px';
+    dot.style.margin = '-2px 0 0 -2px';
+    dot.style.borderRadius = '50%';
+    dot.style.pointerEvents = 'none';
+    dot.style.zIndex = 5;
+    dot.className = 'crossDot';
+    cross.appendChild(dot);
+  }
+  const dot = cross.querySelector('.crossDot');
+  if (dot) dot.style.background = isGood ? '#7fffa1' : 'white';
+}
+
+
+// --- ANIMAL RAYCAST HELPER + RESCUE/RELEASE (REPLACEMENT) ---
+
+// robust animal pick + rescue/release + hover integration
+// Replaces previous pickAnimalUnderCrosshair / attemptRescue / attemptRelease / updateHover override
+
+// returns { hit, kind, index, target } or null
+function pickAnimalUnderCrosshair() {
+  // gather top-level targets and metadata in parallel arrays
+  const targets = [];
+  const meta = []; // { kind: 'bunny'|'fox', index: i }
+  for (let i = 0; i < (bunnies ? bunnies.length : 0); i++) {
+    if (bunnies[i] && bunnies[i].mesh) {
+      targets.push(bunnies[i].mesh);
+      meta.push({ kind: 'bunny', index: i });
+    }
+  }
+  for (let i = 0; i < (foxes ? foxes.length : 0); i++) {
+    if (foxes[i]) {
+      targets.push(foxes[i]);
+      meta.push({ kind: 'fox', index: i });
+    }
+  }
+
+  if (targets.length === 0) return null;
+
+  raycaster.setFromCamera(clickPoint, camera);
+  const hits = raycaster.intersectObjects(targets, true);
+  if (!hits.length) return null;
+
+  // Use the first hit (closest). Walk up the hit.object parent chain to find which top-level target it belongs to.
+  const hit = hits[0];
+  for (let t = 0; t < targets.length; t++) {
+    let node = hit.object;
+    while (node) {
+      if (node === targets[t]) {
+        return {
+          hit,
+          kind: meta[t].kind,
+          index: meta[t].index,
+          target: targets[t]
+        };
+      }
+      node = node.parent;
+    }
+  }
+
+  // If nothing matched (should be rare), return the raw hit so we can at least inspect it elsewhere.
+  return { hit };
+}
+
+// Attempt to rescue the animal under the crosshair (key 8)
+function attemptRescue(){
+  const pick = pickAnimalUnderCrosshair();
+  if (!pick || !pick.hit) { flashObjectiveText("Aim at an animal to rescue"); return; }
+
+  // If pick doesn't include kind/index that means we failed to map it to an animal
+  if (!pick.kind || typeof pick.index === 'undefined') {
+    // Helpful debug text for you while testing
+    flashObjectiveText("Not an animal");
+    return;
+  }
+
+  const foundKind = pick.kind;
+  const foundIndex = pick.index;
+
+  // get the actual mesh reference
+  let animalMesh = null;
+  if (foundKind === 'bunny') animalMesh = bunnies[foundIndex] && bunnies[foundIndex].mesh;
+  if (foundKind === 'fox') animalMesh = foxes[foundIndex];
+
+  if (!animalMesh) { flashObjectiveText("Animal missing"); return; }
+
+  // distance check: use raycast point if available, otherwise mesh position
+  const hitPoint = pick.hit.point ? pick.hit.point : animalMesh.position;
+  const dist = camera.position.distanceTo(hitPoint);
+  if (dist > 2.0) {
+    flashObjectiveText("Too far to rescue — move within 2 meters.");
+    return;
+  }
+
+  // Remove from scene and from arrays
+  try { scene.remove(animalMesh); } catch(e){}
+  if (foundKind === 'bunny') {
+    // remove the bunny entry that matches the mesh
+    // find exact index again just in case indices changed
+    for (let i = 0; i < bunnies.length; i++) {
+      if (bunnies[i] && bunnies[i].mesh === animalMesh) { bunnies.splice(i, 1); break; }
+    }
+  } else if (foundKind === 'fox') {
+    for (let i = 0; i < foxes.length; i++) {
+      if (foxes[i] === animalMesh) { foxes.splice(i, 1); break; }
+    }
+  }
+
+  heldAnimals.push({ type: foundKind });
+  playTone(1400, 0.06);
+  flashObjectiveText("Rescued! Press 9 to Release.");
+  updateObjectiveUI();
+}
+
+// Attempt to release the last held animal (key 9)
+function attemptRelease(){
+  if (heldAnimals.length === 0) { flashObjectiveText("You have no rescued animals to release"); return; }
+
+  const animal = heldAnimals.pop();
+
+  // drop position 1.2m in front of camera
+  const dir = new THREE.Vector3();
+  camera.getWorldDirection(dir);
+  const dropPos = new THREE.Vector3().copy(camera.position).addScaledVector(dir, 1.2);
+
+  // find safe Y (surface) for drop
+  const gx = Math.round((dropPos.x - BLOCK_SIZE/2) / BLOCK_SIZE + SX/2);
+  const gz = Math.round((dropPos.z - BLOCK_SIZE/2) / BLOCK_SIZE + SZ/2);
+  const sy = getSurfaceY(gx, gz);
+  const worldY = (sy !== null) ? (sy + 1) * BLOCK_SIZE : dropPos.y;
+
+  if (animal.type === 'bunny') {
+    const mesh = makeBunnyMesh();
+    mesh.position.set(dropPos.x, worldY, dropPos.z);
+    scene.add(mesh);
+    bunnies.push({
+      mesh,
+      pos: { x: mesh.position.x, y: mesh.position.y, z: mesh.position.z },
+      dir: Math.random() * Math.PI * 2,
+      hopTime: Math.random() * 0.8,
+      wanderTimer: 0.5 + Math.random() * 2.5,
+      speed: 0.7 + Math.random() * 0.3,
+      baseY: worldY
+    });
+  } else if (animal.type === 'fox') {
+    const mesh = makeFoxMesh();
+    mesh.position.set(dropPos.x, worldY, dropPos.z);
+    scene.add(mesh);
+    mesh.userData.home = new THREE.Vector3(mesh.position.x, mesh.position.y, mesh.position.z);
+    mesh.userData.spawnTimeOffset = Math.random() * 5.0;
+    mesh.userData.pos = { x: mesh.position.x, z: mesh.position.z };
+    mesh.userData.dir = Math.random() * Math.PI * 2;
+    mesh.userData.wanderTimer = 0.5 + Math.random() * 2.0;
+    mesh.userData.speed = 0.6 + Math.random() * 0.2;
+    mesh.userData.baseY = mesh.position.y;
+    foxes.push(mesh);
+  }
+
+  // delivered if near the Marine
+  if (marines.length > 0) {
+    const m = marines[0];
+    const dx = dropPos.x - m.position.x;
+    const dz = dropPos.z - m.position.z;
+    const d = Math.sqrt(dx*dx + dz*dz);
+    if (d <= 2.0) {
+      deliveredAnimals++;
+      flashObjectiveText(`Delivered to Marine! ${deliveredAnimals}/${totalAnimals}`);
+      playTone(1800, 0.06);
+      updateObjectiveUI();
+      if (deliveredAnimals >= totalAnimals) {
+        document.getElementById('objective').textContent = "Objective: Completed — You Win!";
+        flashObjectiveText("All animals rescued — You Win!");
+      }
+      return;
+    }
+  }
+
+  flashObjectiveText("Animal released.");
+  playTone(900, 0.05);
+  updateObjectiveUI();
+}
+
+// override hover so crosshair color turns green when aiming at an animal within 2m
+const original_updateHover = updateHover;
+updateHover = function(){
+  // keep original block hover for block highlighting
+  const hitInfo = original_updateHover();
+
+  // always check animals under crosshair directly
+  const pick = (typeof pickAnimalUnderCrosshair === 'function') ? pickAnimalUnderCrosshair() : null;
+  let isGood = false;
+  if (pick && pick.hit) {
+    let checkPoint = pick.hit.point ? pick.hit.point : (pick.target ? pick.target.position : null);
+    if (checkPoint) {
+      const d = camera.position.distanceTo(checkPoint);
+      if (d <= 2.0) isGood = true;
+    }
+  } else if (hitInfo && hitInfo.hit && hitInfo.hit.object) {
+    // fallback: if block hover returned something, see if that object belongs to an animal
+    const found = (typeof findAnimalFromObject === 'function') ? findAnimalFromObject(hitInfo.hit.object) : null;
+    if (found) {
+      const mesh = (found.kind === 'bunny') ? (bunnies[found.index] && bunnies[found.index].mesh) : foxes[found.index];
+      if (mesh) {
+        const d = camera.position.distanceTo(mesh.position);
+        if (d <= 2.0) isGood = true;
+      }
+    }
+  }
+
+  if (typeof updateCrosshairForAnimal === 'function') updateCrosshairForAnimal(isGood);
+  return hitInfo;
+};
 const clock = new THREE.Clock();
 function animate(){
   resize();
@@ -1497,6 +2043,12 @@ for (let i = foxes.length - 1; i >= 0; i--) {
   animateFox(f, dt);
 }
 
+// === Marines: animate (patrol + removal) ===
+for (let i = marines.length - 1; i >= 0; i--) {
+  const m = marines[i];
+  animateMarine(m, dt);
+}
+
 // === Rocks: gravity, fall-through, and removal ===
 const GRAVITY = -22.0; // tune this if you want slower/faster falling
 
@@ -1554,12 +2106,63 @@ for (let i = rocks.length - 1; i >= 0; i--) {
     // keep rock sitting on the surface neatly
     if (hasSurface) r.position.y = targetWorldY;
   }
+} // === Trees: gravity, fall-through, and removal (similar to rocks) ===
+const TREE_GRAVITY = -18.0; // gentler gravity for trees (tweakable)
+
+for (let i = trees.length - 1; i >= 0; i--) {
+  const tr = trees[i];
+
+  if (!tr.parent) { trees.splice(i,1); continue; }
+
+  const gx = Math.round((tr.position.x - BLOCK_SIZE/2) / BLOCK_SIZE + SX/2);
+  const gz = Math.round((tr.position.z - BLOCK_SIZE/2) / BLOCK_SIZE + SZ/2);
+  const surfaceY = getSurfaceY(gx, gz);
+  const hasSurface = surfaceY !== null;
+  const targetWorldY = hasSurface ? (surfaceY + 1) * BLOCK_SIZE + 0.02 : null;
+
+  if (!hasSurface) {
+    if (!tr.userData.falling) { tr.userData.falling = true; tr.userData.velY = 0; }
+  } else {
+    if (!tr.userData.falling && tr.position.y > targetWorldY + 0.05) {
+      tr.userData.falling = true;
+      tr.userData.velY = 0;
+    }
+  }
+
+  if (tr.userData.falling) {
+    tr.userData.velY += (TREE_GRAVITY / (tr.userData.mass || 1.0)) * dt;
+    tr.position.y += tr.userData.velY * dt;
+
+    if (hasSurface && tr.position.y <= targetWorldY) {
+      tr.position.y = targetWorldY;
+      tr.userData.velY = 0;
+      tr.userData.falling = false;
+    }
+
+    if (tr.position.y < -BLOCK_SIZE * 20) {
+      try { decorGroup.remove(tr); } catch(e) {}
+      try { if (tr.parent) tr.parent.remove(tr); } catch(e) {}
+      trees.splice(i, 1);
+      continue;
+    }
+  } else {
+    if (hasSurface) tr.position.y = targetWorldY;
+  }
 }
 
 
 
 
+
   // render
+// pulse the starting island glow (if present)
+if (startGlow) {
+  startGlow.userData.pulsePhase += dt * 2.2;
+  const p = 0.08 + 0.04 * Math.sin(startGlow.userData.pulsePhase);
+  startGlow.material.opacity = p;
+  startGlow.material.emissiveIntensity = 0.6 + 0.6 * (Math.sin(startGlow.userData.pulsePhase) * 0.5 + 0.5);
+}
+
   renderer.render(scene, camera);
   requestAnimationFrame(animate);
 }
@@ -1582,6 +2185,39 @@ generateIslandsOnly();
 rebuildInstances();
 respawn();
 updatePlacedBadge();
+// STARTUP: count animals, create subtle starting glow, add help text
+countTotalAnimals();
+
+// Create a subtle yellow shimmer on the starting island (ring/circle under spawn).
+let startGlow = null;
+function createStartGlow(){
+  if (startGlow) return;
+  const ring = new THREE.Mesh(
+    new THREE.CircleGeometry(2.0, 24),
+    new THREE.MeshStandardMaterial({
+      color: 0xfff0a0,
+      emissive: 0xfff0a0,
+      emissiveIntensity: 0.9,
+      transparent: true,
+      opacity: 0.10,
+      side: THREE.DoubleSide
+    })
+  );
+  ring.rotation.x = -Math.PI/2;
+  ring.position.set(RESPAWN_POS.x, 0.06, RESPAWN_POS.z);
+  scene.add(ring);
+  startGlow = ring;
+}
+createStartGlow();
+
+// animate the glow (pulse) inside animate() — we'll do a tiny hook: create a global flag so animate() picks it up.
+startGlow.userData.pulsePhase = Math.random() * Math.PI * 2;
+
+// add help text so keys 8/9 are visible
+const helpEl = document.getElementById('help');
+if (helpEl) helpEl.textContent = '';
+updateObjectiveUI();
+
 
 // Fade out controls after 10 seconds
 setTimeout(() => {
